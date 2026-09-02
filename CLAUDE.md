@@ -8,15 +8,17 @@ One directory per AWS Lambda function, each a self-contained deployment bundle. 
 
 - `defa-luci/` — polls the `dolls` collection on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
 
-A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects) plus any pure-Python dependencies vendored flat alongside it, so the directory can be zipped and uploaded as-is. Nothing is vendored right now: `requests` comes from a Lambda layer or the runtime. When adding a dependency, decide deliberately — vendor it into the function directory, or add it to the layer. A vendored file is not project code; never edit or refactor one.
+A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects) and an optional `requirements.txt`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
 
-Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics.
+Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. `defa-luci` runs `python3.13` on `x86_64`.
+
+The `actions/setup-python` version in the deploy workflow must match the Lambda runtime. `pip` resolves interpreter-specific wheels — `charset_normalizer`, pulled in by `requests`, ships a `cp313` binary wheel — so building on a different Python produces a bundle that fails at import time with `Runtime.ImportModuleError`.
 
 ## Deploy
 
 Deploys are automatic: pushing or merging to `main` triggers `.github/workflows/deploy.yml`.
 
-The workflow diffs the push against its base, deploys only the directories that changed, and runs one matrix job per function with `fail-fast: false`. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
+The workflow diffs the push against its base, deploys only the directories that changed, and runs one matrix job per function with `fail-fast: false`. Each job installs the function's `requirements.txt` into a staging copy, zips it, and uploads. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
 
 AWS auth is OIDC: secret `AWS_ROLE_ARN` plus repository variable `AWS_REGION` (defaults to `eu-north-1`, where the functions live). The IAM role needs `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration` and `lambda:GetFunction`. Setup steps are documented in the workflow's header comment — note in particular that GitHub now issues subject claims containing numeric owner and repo ids (`repo:OWNER@ID/REPO@ID:ref:...`); a trust policy written against the old `repo:OWNER/REPO:ref:...` form fails with `AccessDenied`.
 
@@ -41,6 +43,7 @@ Things worth knowing before changing this:
 - **Silent empty results are the expected failure mode.** If the collection handle changes or the store stops exposing `products.json`, the handler returns `available_count: 0` with a 200, not an error. Verify against the live feed rather than trusting a green run.
 - **The function has no memory.** Every invocation notifies about everything currently in stock, so it will re-send the same dolls on every schedule tick. Any deduplication would need external state (DynamoDB, S3) that does not exist yet.
 - **Never let the bot token reach a response body.** `requests` embeds the full URL in `HTTPError` messages, and the Telegram API URL contains the token. `redact()` exists for exactly this; route any new error text through it.
+- **A deploy that drops a dependency fails silently until invocation.** `update-function-code` succeeds regardless; the function then dies on cold start with `Runtime.ImportModuleError`. After changing the bundle's contents, invoke once and read the log rather than trusting a green workflow run.
 - **The message is not chunked.** Telegram rejects messages over 4096 characters, so a large restock currently fails the send and returns a 502.
 
 `lambda_handler` maps failures to status codes: `HTTPError` → 502, other `RequestException` → 502, anything else (including missing configuration) → 500. All responses are built by `json_response` and serialized with `ensure_ascii=False`.

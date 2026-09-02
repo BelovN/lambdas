@@ -99,20 +99,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Must match the Lambda runtime: pip resolves version-specific wheels,
+      # and a cp312 wheel will not import on a python3.13 runtime.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           role-session-name: gha-deploy-${{ matrix.function }}
           aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
 
+      # Dependencies go inside the zip: this account uses no Lambda layers.
       - name: Собрать zip
         env:
           FUNCTION: ${{ matrix.function }}
         run: |
           set -euo pipefail
-          cd "$FUNCTION"
-          zip -r "$RUNNER_TEMP/$FUNCTION.zip" . \
-            -x '*.pyc' -x '__pycache__/*' -x '.DS_Store'
+
+          BUILD="$RUNNER_TEMP/build/$FUNCTION"
+          mkdir -p "$BUILD"
+          cp -R "$FUNCTION/." "$BUILD/"
+
+          if [ -f "$BUILD/requirements.txt" ]; then
+            pip install --quiet --requirement "$BUILD/requirements.txt" --target "$BUILD"
+            rm "$BUILD/requirements.txt"
+          fi
+
+          cd "$BUILD"
+          zip -qr "$RUNNER_TEMP/$FUNCTION.zip" . \
+            -x '*.pyc' -x '*__pycache__*' -x '.DS_Store'
+          unzip -l "$RUNNER_TEMP/$FUNCTION.zip" | tail -1
 
       - name: Обновить код функции
         env:
