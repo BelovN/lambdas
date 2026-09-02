@@ -3,6 +3,7 @@
 import hmac
 import json
 import os
+import re
 from typing import Any
 
 import requests
@@ -11,8 +12,8 @@ SERVER_NAME = "telegram-mcp"
 SERVER_VERSION = "1.0.0"
 SERVER_INFO = {"name": SERVER_NAME, "version": SERVER_VERSION}
 SERVER_INSTRUCTIONS = (
-    "Use send_notification to deliver a short plain-text message to the "
-    "operator's Telegram chats."
+    "Use send_notification to deliver a short Markdown-formatted message to "
+    "the operator's Telegram chats."
 )
 
 # 2026-07-28 requires ttlMs/cacheScope on list results. The tool set is static.
@@ -42,15 +43,17 @@ TOOLS = [
         "name": "send_notification",
         "title": "Send notification",
         "description": (
-            "Send a plain-text notification to the Telegram chats this server "
-            "is configured with. Returns the number of chats reached."
+            "Send a notification to the Telegram chats this server is configured "
+            "with. The message is written in Markdown: bold, italic, strikethrough, "
+            "inline code, fenced code blocks, links, headings, bullet lists and "
+            "block quotes are rendered. Returns the number of chats reached."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "Notification text.",
+                    "description": "Notification text, in Markdown.",
                     "minLength": 1,
                     "maxLength": TELEGRAM_MAX_MESSAGE_CHARS,
                 }
@@ -60,6 +63,93 @@ TOOLS = [
         },
     }
 ]
+
+
+_FENCED_RE = re.compile(r"```(\w+)?\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_LINK_RE = re.compile(r"\[([^\]\n]*)\]\(([^)\s]+)\)")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*$")
+_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+")
+_RULE_RE = re.compile(r"^\s*([-*_])\s*(?:\1\s*){2,}$")
+# Runs after HTML escaping, so the marker is already "&gt;".
+_QUOTE_RE = re.compile(r"^\s{0,3}&gt;\s?(.*)$")
+
+# Telegram's HTML mode understands only a small tag set, so emphasis markers are
+# mapped onto it and everything else (headings, lists, rules) degrades to text.
+_STYLES = (
+    (re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL), "b"),
+    (re.compile(r"(?<![\w*])__(?=\S)(.+?)(?<=\S)__(?![\w*])", re.DOTALL), "b"),
+    (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~", re.DOTALL), "s"),
+    (re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])"), "i"),
+    (re.compile(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])"), "i"),
+)
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def markdown_to_telegram_html(text: str) -> str:
+    """Render a practical subset of Markdown into the HTML tags Telegram accepts."""
+    text = text.replace("\x00", "")
+    code: list[str] = []
+
+    def stash_fenced(m: re.Match[str]) -> str:
+        language, body = m.group(1), m.group(2).strip("\n")
+        attr = f' class="language-{_escape(language)}"' if language else ""
+        code.append(f"<pre><code{attr}>{_escape(body)}</code></pre>")
+        return f"\x00{len(code) - 1}\x00"
+
+    def stash_inline(m: re.Match[str]) -> str:
+        code.append(f"<code>{_escape(m.group(1))}</code>")
+        return f"\x00{len(code) - 1}\x00"
+
+    text = _FENCED_RE.sub(stash_fenced, text)
+    text = _INLINE_CODE_RE.sub(stash_inline, text)
+    text = _escape(text)
+
+    lines: list[str] = []
+    quoted: list[str] = []
+
+    def flush_quote() -> None:
+        if quoted:
+            lines.append("<blockquote>" + "\n".join(quoted) + "</blockquote>")
+            quoted.clear()
+
+    for line in text.split("\n"):
+        quote = _QUOTE_RE.match(line)
+        if quote:
+            quoted.append(quote.group(1))
+            continue
+        flush_quote()
+
+        heading = _HEADING_RE.match(line)
+        if heading and heading.group(1):
+            lines.append(f"<b>{heading.group(1)}</b>")
+        elif _RULE_RE.match(line):
+            lines.append("\u2500" * 12)
+        else:
+            lines.append(_BULLET_RE.sub(lambda m: f"{m.group(1)}\u2022 ", line))
+    flush_quote()
+    text = "\n".join(lines)
+
+    urls: list[str] = []
+
+    def stash_link(m: re.Match[str]) -> str:
+        urls.append(m.group(2).replace('"', "&quot;"))
+        return f'<a href="\x00u{len(urls) - 1}\x00">{m.group(1)}</a>'
+
+    text = _LINK_RE.sub(stash_link, text)
+
+    for pattern, tag in _STYLES:
+        text = pattern.sub(lambda m, t=tag: f"<{t}>{m.group(1)}</{t}>", text)
+
+    for index, url in enumerate(urls):
+        text = text.replace(f"\x00u{index}\x00", url)
+    for index, snippet in enumerate(code):
+        text = text.replace(f"\x00{index}\x00", snippet)
+
+    return text
 
 
 def redact(text: str) -> str:
@@ -129,20 +219,32 @@ def send_telegram_message(text: str) -> tuple[int, list[str]]:
         raise ValueError("Environment variable TELEGRAM_CHAT_IDS is empty or not set")
 
     url = TELEGRAM_API_URL.format(token=token)
+    html = markdown_to_telegram_html(text)
     delivered = 0
     failures: list[str] = []
+
+    def post(chat_id: str, body: str, parse_mode: str | None) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": body,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        response = requests.post(url, timeout=TIMEOUT_SECONDS, json=payload)
+        response.raise_for_status()
+        if not response.json().get("ok"):
+            raise ValueError("Telegram API rejected the message")
 
     # One bad chat id must not hide the deliveries that did succeed.
     for chat_id in chat_ids:
         try:
-            response = requests.post(
-                url,
-                timeout=TIMEOUT_SECONDS,
-                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-            )
-            response.raise_for_status()
-            if not response.json().get("ok"):
-                raise ValueError("Telegram API rejected the message")
+            try:
+                post(chat_id, html, "HTML")
+            except requests.HTTPError:
+                # A notification is worth more unformatted than not at all, and
+                # only Telegram can judge whether the markup parses.
+                post(chat_id, text, None)
         except (requests.RequestException, ValueError) as exc:
             failures.append(f"{chat_id}: {redact(str(exc))}")
         else:
