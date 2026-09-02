@@ -48,6 +48,7 @@ Things worth knowing before changing this:
 - **Auth fails closed.** An unset `MCP_AUTH_TOKEN` raises rather than defaulting to open, so a misconfigured deploy returns 500 instead of exposing a public endpoint that spams Telegram. Keep it that way — the Function URL itself is `AuthType: NONE`, so this check is the only thing guarding it. Tokens are compared with `hmac.compare_digest`.
 - **Tool failures are results, not protocol errors.** A Telegram outage returns `isError: true` inside a 200 so the model can see and report it; JSON-RPC error codes are reserved for malformed or unknown requests.
 - **The bot token must never reach a response.** Same trap as `defa-luci`: `requests` embeds the URL in `HTTPError` messages. Route new error text through `redact()`.
+- **A public Function URL needs two permissions.** Since October 2025 Lambda requires both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` (the latter conditioned on `lambda:InvokedViaFunctionUrl`) in the resource policy. With only the first, every request gets a 403 from Lambda itself, before the handler runs, even with `AuthType: NONE`.
 - **Batching is rejected.** JSON-RPC batches were removed from MCP in 2025-06-18, so a top-level array gets `-32600`.
 
 Environment: `MCP_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_IDS` (comma-separated).

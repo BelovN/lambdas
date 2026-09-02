@@ -176,12 +176,21 @@ jobs:
           echo "Функция создана."
 
           if [ "$(jq -r '.function_url // false' "$CFG")" = "true" ]; then
+            # С октября 2025 Function URL требует ОБА разрешения. Без второго
+            # запрос получает 403 даже при auth type NONE.
             aws lambda add-permission \
               --function-name "$FUNCTION" \
               --statement-id FunctionURLAllowPublicAccess \
               --action lambda:InvokeFunctionUrl \
               --principal '*' \
               --function-url-auth-type NONE \
+              --no-cli-pager >/dev/null
+            aws lambda add-permission \
+              --function-name "$FUNCTION" \
+              --statement-id FunctionURLInvokeAllowPublicAccess \
+              --action lambda:InvokeFunction \
+              --principal '*' \
+              --invoked-via-function-url \
               --no-cli-pager >/dev/null
             URL=$(aws lambda create-function-url-config \
               --function-name "$FUNCTION" \
