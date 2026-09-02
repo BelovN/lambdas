@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Deploy artifacts
+*.zip
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

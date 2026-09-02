@@ -5,13 +5,18 @@
 #
 # Что нужно настроить один раз:
 #   1. В AWS создать OIDC identity provider для token.actions.githubusercontent.com
-#      (audience sts.amazonaws.com) и IAM-роль, которой доверяет
-#      repo:BelovN/lambdas:ref:refs/heads/main, с правами
+#      (audience sts.amazonaws.com) и IAM-роль с правами
 #      lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration,
 #      lambda:GetFunction на нужные функции.
-#   2. Settings → Secrets and variables → Actions:
+#   2. В trust policy роли условие на sub писать в НОВОМ формате GitHub, где
+#      в клейм подставляются числовые id владельца и репозитория:
+#        repo:BelovN@68339775/lambdas@1355115369:ref:refs/heads/main
+#      Старый формат repo:BelovN/lambdas:ref:refs/heads/main больше не
+#      совпадает и даёт AccessDenied на sts:AssumeRoleWithWebIdentity.
+#      Реальный sub всегда видно в CloudTrail в событии AssumeRoleWithWebIdentity.
+#   3. Settings → Secrets and variables → Actions:
 #        secret AWS_ROLE_ARN  — ARN этой роли
-#        variable AWS_REGION  — регион лямбд (по умолчанию us-east-1)
+#        variable AWS_REGION  — регион лямбд (по умолчанию eu-north-1)
 
 name: Deploy Lambdas
 
@@ -98,7 +103,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           role-session-name: gha-deploy-${{ matrix.function }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
 
       - name: Собрать zip
         env:
