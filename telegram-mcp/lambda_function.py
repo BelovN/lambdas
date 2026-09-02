@@ -199,7 +199,15 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             # Stateless server: no SSE stream to open, so GET has nothing to serve.
             return http_response(405, {"error": "Only POST is supported"}, {"Allow": "POST"})
 
-        if not is_authorized(headers):
+        try:
+            authorized = is_authorized(headers)
+        except ValueError as exc:
+            # Misconfiguration is the operator's problem, not the caller's:
+            # log the detail, tell an unauthenticated client nothing.
+            print(f"Configuration error: {exc}")
+            return http_response(503, {"error": "Server is not configured"})
+
+        if not authorized:
             return http_response(
                 401,
                 {"error": "Unauthorized"},
