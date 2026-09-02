@@ -41,7 +41,9 @@ That call **replaces the whole environment map**, so the secret is the single so
 
 A single Lambda Function URL speaks MCP's Streamable HTTP transport. The 2026-07-28 revision made the protocol core stateless — `initialize`/`initialized` and `Mcp-Session-Id` were retired — which is what makes one request per invocation viable with no session store. `dispatch` still answers `initialize` so clients on 2025-06-18 and 2025-03-26 connect, echoing back whichever version the client asked for when it is supported.
 
-There is no MCP SDK in the bundle: the server implements the JSON-RPC surface it needs (`initialize`, `ping`, `tools/list`, `tools/call`) directly, which is a few dozen lines against a dependency that assumes a long-lived process.
+There is no MCP SDK in the bundle: the server implements the JSON-RPC surface it needs (`server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`) directly, which is a few dozen lines against a dependency that assumes a long-lived process.
+
+Hand-rolling means the 2026-07-28 obligations have to be met by hand. Servers **MUST** implement `server/discover` — it is what replaced the handshake, and a modern client calls it first; answering `-32601` there is what makes a connector report the server as unreachable. Every result carries `resultType: "complete"`, list results carry `ttlMs` and `cacheScope`, and results identify the server under `_meta["io.modelcontextprotocol/serverInfo"]`.
 
 Things worth knowing before changing this:
 

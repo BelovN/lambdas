@@ -9,6 +9,14 @@ import requests
 
 SERVER_NAME = "telegram-mcp"
 SERVER_VERSION = "1.0.0"
+SERVER_INFO = {"name": SERVER_NAME, "version": SERVER_VERSION}
+SERVER_INSTRUCTIONS = (
+    "Use send_notification to deliver a short plain-text message to the "
+    "operator's Telegram chats."
+)
+
+# 2026-07-28 requires ttlMs/cacheScope on list results. The tool set is static.
+LIST_TTL_MS = 3_600_000
 
 # Newest first: an unknown version from the client is answered with LATEST.
 SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-06-18", "2025-03-26")
@@ -75,8 +83,12 @@ def http_response(status_code: int, payload: Any, extra_headers: dict[str, str] 
     }
 
 
-def rpc_result(request_id: Any, result: Any) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+def rpc_result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    # 2026-07-28 requires resultType on every result and asks servers to
+    # identify themselves in _meta. Legacy clients must ignore both.
+    body: dict[str, Any] = {"resultType": "complete", **result}
+    body.setdefault("_meta", {})["io.modelcontextprotocol/serverInfo"] = SERVER_INFO
+    return {"jsonrpc": "2.0", "id": request_id, "result": body}
 
 
 def rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -184,6 +196,19 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
         # notifications/initialized and friends: accepted, nothing to answer.
         return None
 
+    if method == "server/discover":
+        # Servers MUST implement this: it replaced the initialize handshake.
+        return rpc_result(
+            request_id,
+            {
+                "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "capabilities": {"tools": {}},
+                "instructions": SERVER_INSTRUCTIONS,
+                "ttlMs": LIST_TTL_MS,
+                "cacheScope": "public",
+            },
+        )
+
     if method == "initialize":
         requested = (request.get("params") or {}).get("protocolVersion")
         negotiated = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
@@ -192,7 +217,8 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
             {
                 "protocolVersion": negotiated,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+                "serverInfo": SERVER_INFO,
+                "instructions": SERVER_INSTRUCTIONS,
             },
         )
 
@@ -200,7 +226,10 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
         return rpc_result(request_id, {})
 
     if method == "tools/list":
-        return rpc_result(request_id, {"tools": TOOLS})
+        return rpc_result(
+            request_id,
+            {"tools": TOOLS, "ttlMs": LIST_TTL_MS, "cacheScope": "public"},
+        )
 
     if method == "tools/call":
         params = request.get("params") or {}
