@@ -96,7 +96,8 @@ def is_authorized(headers: dict[str, str]) -> bool:
     return hmac.compare_digest(value.strip(), expected)
 
 
-def send_telegram_message(text: str) -> int:
+def send_telegram_message(text: str) -> tuple[int, list[str]]:
+    """Deliver to every configured chat; return how many succeeded and why the rest failed."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise ValueError("Environment variable TELEGRAM_BOT_TOKEN is not set")
@@ -107,19 +108,26 @@ def send_telegram_message(text: str) -> int:
         raise ValueError("Environment variable TELEGRAM_CHAT_IDS is empty or not set")
 
     url = TELEGRAM_API_URL.format(token=token)
+    delivered = 0
+    failures: list[str] = []
+
+    # One bad chat id must not hide the deliveries that did succeed.
     for chat_id in chat_ids:
-        response = requests.post(
-            url,
-            timeout=TIMEOUT_SECONDS,
-            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                url,
+                timeout=TIMEOUT_SECONDS,
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            )
+            response.raise_for_status()
+            if not response.json().get("ok"):
+                raise ValueError("Telegram API rejected the message")
+        except (requests.RequestException, ValueError) as exc:
+            failures.append(f"{chat_id}: {redact(str(exc))}")
+        else:
+            delivered += 1
 
-        payload = response.json()
-        if not payload.get("ok"):
-            raise ValueError(f"Telegram API rejected the message for chat {chat_id}")
-
-    return len(chat_ids)
+    return delivered, failures
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -137,12 +145,21 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         )
 
     try:
-        delivered = send_telegram_message(message)
-    except (requests.RequestException, ValueError) as exc:
+        delivered, failures = send_telegram_message(message)
+    except ValueError as exc:
         # Tool failures belong in the result, not in a JSON-RPC protocol error.
         return tool_result(f"Failed to send notification: {redact(str(exc))}", is_error=True)
 
-    return tool_result(f"Notification delivered to {delivered} chat(s).")
+    if not failures:
+        return tool_result(f"Notification delivered to {delivered} chat(s).")
+
+    detail = "; ".join(failures)
+    if delivered:
+        return tool_result(
+            f"Notification delivered to {delivered} chat(s); {len(failures)} failed: {detail}",
+            is_error=True,
+        )
+    return tool_result(f"Failed to send notification: {detail}", is_error=True)
 
 
 def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
