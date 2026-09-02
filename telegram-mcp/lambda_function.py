@@ -219,7 +219,15 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-        method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "")
+        http = (event.get("requestContext") or {}).get("http") or {}
+        method = http.get("method", "")
+
+        # Request line for debugging clients. Never log the Authorization header
+        # or the query string: both carry the token.
+        print(
+            f"{method} {http.get('path', '')} "
+            f"accept={headers.get('accept', '-')!r} ua={headers.get('user-agent', '-')!r}"
+        )
 
         if method.upper() != "POST":
             # Stateless server: no SSE stream to open, so GET has nothing to serve.
@@ -248,6 +256,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if not isinstance(request, dict):
             # JSON-RPC batching was removed from MCP in 2025-06-18.
             return http_response(400, rpc_error(None, INVALID_REQUEST, "Expected a single JSON-RPC object"))
+
+        print(f"rpc method={request.get('method')!r} id={request.get('id')!r}")
 
         response = dispatch(request)
         if response is None:
