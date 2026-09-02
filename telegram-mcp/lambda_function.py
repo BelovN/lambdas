@@ -18,6 +18,10 @@ TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TIMEOUT_SECONDS = 15
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
+# Clients that cannot set headers (the claude.ai connector form takes a URL and
+# nothing else) may pass the same token as ?k=<token> instead.
+QUERY_TOKEN_PARAM = "k"
+
 # JSON-RPC 2.0 error codes.
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -83,17 +87,22 @@ def tool_result(text: str, is_error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-def is_authorized(headers: dict[str, str]) -> bool:
+def is_authorized(headers: dict[str, str], query: dict[str, str]) -> bool:
     expected = os.environ.get("MCP_AUTH_TOKEN", "").strip()
     if not expected:
         # Fail closed: an unset token must never mean "open to everyone".
         raise ValueError("Environment variable MCP_AUTH_TOKEN is not set")
 
-    presented = headers.get("authorization", "")
-    scheme, _, value = presented.partition(" ")
-    if scheme.lower() != "bearer":
-        return False
-    return hmac.compare_digest(value.strip(), expected)
+    scheme, _, value = headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        return hmac.compare_digest(value.strip(), expected)
+
+    # The header is preferred: unlike a query string it stays out of access logs.
+    from_query = (query or {}).get(QUERY_TOKEN_PARAM, "")
+    if from_query:
+        return hmac.compare_digest(from_query, expected)
+
+    return False
 
 
 def send_telegram_message(text: str) -> tuple[int, list[str]]:
@@ -217,7 +226,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             return http_response(405, {"error": "Only POST is supported"}, {"Allow": "POST"})
 
         try:
-            authorized = is_authorized(headers)
+            authorized = is_authorized(headers, event.get("queryStringParameters") or {})
         except ValueError as exc:
             # Misconfiguration is the operator's problem, not the caller's:
             # log the detail, tell an unauthenticated client nothing.

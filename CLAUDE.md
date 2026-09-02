@@ -45,10 +45,12 @@ There is no MCP SDK in the bundle: the server implements the JSON-RPC surface it
 
 Things worth knowing before changing this:
 
+- **Two ways to present the token, one secret.** `Authorization: Bearer` is checked first; `?k=<token>` is the fallback for clients that can only be given a URL — the claude.ai connector form takes a URL and OAuth fields, with nowhere to put a header. Prefer the header: a query string reaches access logs and referrers, a header does not. A present-but-wrong header is a failed attempt and does not fall through to the query parameter.
 - **Auth fails closed.** An unset `MCP_AUTH_TOKEN` raises rather than defaulting to open, so a misconfigured deploy returns 503 instead of exposing a public endpoint that spams Telegram. The reason goes to CloudWatch, never to the caller — the endpoint is unauthenticated at that point, so it must not describe its own configuration. Keep it that way — the Function URL itself is `AuthType: NONE`, so this check is the only thing guarding it. Tokens are compared with `hmac.compare_digest`.
 - **Partial delivery is reported as such.** A failing chat id no longer aborts the loop, so the result distinguishes "delivered to 2, 1 failed" from a total failure. Only a configuration error (missing token or chat ids) short-circuits before any send.
 - **Tool failures are results, not protocol errors.** A Telegram outage returns `isError: true` inside a 200 so the model can see and report it; JSON-RPC error codes are reserved for malformed or unknown requests.
 - **The bot token must never reach a response.** Same trap as `defa-luci`: `requests` embeds the URL in `HTTPError` messages. Route new error text through `redact()`.
+- **A Function URL rewrites `WWW-Authenticate`.** It reaches the client as `x-amzn-Remapped-www-authenticate`, so the 401 carries no usable challenge. Any future OAuth support would need the discovery hint somewhere else, or API Gateway instead of a Function URL.
 - **A public Function URL needs two permissions.** Since October 2025 Lambda requires both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` (the latter conditioned on `lambda:InvokedViaFunctionUrl`) in the resource policy. With only the first, every request gets a 403 from Lambda itself, before the handler runs, even with `AuthType: NONE`.
 - **Batching is rejected.** JSON-RPC batches were removed from MCP in 2025-06-18, so a top-level array gets `-32600`.
 
