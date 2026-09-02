@@ -78,7 +78,9 @@ jobs:
             SELECTED=$(printf '%s\n' "${ALL[@]}")
           fi
 
-          JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' | jq -R . | jq -sc .)
+          JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' \
+            | jq -R '{name: ., env_secret: ("LAMBDA_ENV_" + (ascii_upcase | gsub("-"; "_")))}' \
+            | jq -sc .)
           echo "Функции к деплою: $JSON"
           echo "functions=$JSON" >> "$GITHUB_OUTPUT"
           if [ "$JSON" = "[]" ]; then
@@ -88,14 +90,14 @@ jobs:
           fi
 
   deploy:
-    name: Деплой ${{ matrix.function }}
+    name: Деплой ${{ matrix.name }}
     needs: detect
     if: needs.detect.outputs.any == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        function: ${{ fromJSON(needs.detect.outputs.functions) }}
+        include: ${{ fromJSON(needs.detect.outputs.functions) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -108,13 +110,13 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: gha-deploy-${{ matrix.function }}
+          role-session-name: gha-deploy-${{ matrix.name }}
           aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
 
       # Dependencies go inside the zip: this account uses no Lambda layers.
       - name: Собрать zip
         env:
-          FUNCTION: ${{ matrix.function }}
+          FUNCTION: ${{ matrix.name }}
         run: |
           set -euo pipefail
 
@@ -134,7 +136,7 @@ jobs:
 
       - name: Обновить код функции
         env:
-          FUNCTION: ${{ matrix.function }}
+          FUNCTION: ${{ matrix.name }}
         run: |
           set -euo pipefail
           aws lambda update-function-code \
@@ -148,32 +150,35 @@ jobs:
       # должен быть JSON-объектом {"VAR": "value"}. Он ПОЛНОСТЬЮ заменяет карту
       # переменных окружения функции — правки через консоль AWS будут затёрты.
       # Если секрета нет, шаг ничего не делает.
+      #
+      # Пробрасывается ровно один секрет, адресованный по имени из матрицы.
+      # toJSON(secrets) здесь использовать нельзя: выгрузка всех секретов разом —
+      # это канонический паттерн эксфильтрации, и GitHub придерживает такие раны
+      # на ручной аппрув как потенциально вредоносные.
       - name: Обновить переменные окружения
         env:
-          FUNCTION: ${{ matrix.function }}
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          FUNCTION: ${{ matrix.name }}
+          SECRET_NAME: ${{ matrix.env_secret }}
+          LAMBDA_ENV: ${{ secrets[matrix.env_secret] }}
         run: |
           set -euo pipefail
 
-          KEY="LAMBDA_ENV_$(printf '%s' "$FUNCTION" | tr 'a-z-' 'A-Z_')"
-          VALUE=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$KEY" '.[$k] // empty')
-
-          if [ -z "$VALUE" ]; then
-            echo "Секрет $KEY не задан — переменные окружения не трогаем."
+          if [ -z "${LAMBDA_ENV:-}" ]; then
+            echo "Секрет $SECRET_NAME не задан — переменные окружения не трогаем."
             exit 0
           fi
 
-          if ! printf '%s' "$VALUE" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            echo "::error::Секрет $KEY должен быть JSON-объектом вида {\"VAR\": \"value\"}"
+          if ! printf '%s' "$LAMBDA_ENV" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            echo "::error::Секрет $SECRET_NAME должен быть JSON-объектом вида {\"VAR\": \"value\"}"
             exit 1
           fi
 
           # GitHub маскирует секрет целиком, но не отдельные поля внутри JSON
-          printf '%s' "$VALUE" | jq -r '.[] | tostring' | while IFS= read -r v; do
+          printf '%s' "$LAMBDA_ENV" | jq -r '.[] | tostring' | while IFS= read -r v; do
             if [ -n "$v" ]; then echo "::add-mask::$v"; fi
           done
 
-          printf '%s' "$VALUE" | jq -c '{Variables: map_values(tostring)}' \
+          printf '%s' "$LAMBDA_ENV" | jq -c '{Variables: map_values(tostring)}' \
             > "$RUNNER_TEMP/env.json"
 
           aws lambda update-function-configuration \
@@ -182,4 +187,4 @@ jobs:
             --no-cli-pager >/dev/null
           aws lambda wait function-updated --function-name "$FUNCTION"
 
-          echo "Переменных окружения обновлено: $(printf '%s' "$VALUE" | jq 'length')"
+          echo "Переменных окружения обновлено: $(printf '%s' "$LAMBDA_ENV" | jq 'length')"

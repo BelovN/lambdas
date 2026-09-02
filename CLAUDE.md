@@ -26,6 +26,8 @@ AWS auth is OIDC: secret `AWS_ROLE_ARN` plus repository variable `AWS_REGION` (d
 
 A function's environment variables come from one GitHub secret named `LAMBDA_ENV_<FUNCTION_NAME>` — uppercased, hyphens replaced by underscores (`defa-luci` → `LAMBDA_ENV_DEFA_LUCI`). Its value is a JSON object of variable names to values, and the workflow writes it with `update-function-configuration`.
 
+The workflow passes exactly one secret per job, addressed by a name the `detect` job computes into the matrix (`secrets[matrix.env_secret]`). Do not reach for `toJSON(secrets)`: dumping every secret into one variable is the canonical exfiltration pattern, and since July 2026 GitHub automatically holds workflow runs it reads as potentially malicious, blocking them on manual approval. That hold applies to public repositories, is on by default, and there is no setting to turn it off.
+
 That call **replaces the whole environment map**, so the secret is the single source of truth: anything set by hand in the AWS console is wiped on the next deploy, and removing a variable means removing it from the JSON. A function with no such secret keeps whatever environment it already has.
 
 `defa-luci` expects `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_IDS` (comma-separated).
