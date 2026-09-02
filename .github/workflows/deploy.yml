@@ -1,0 +1,162 @@
+# Деплой лямбд в AWS при пуше/мерже в main.
+#
+# Директория функции — та, где лежит lambda_function.py. Имя директории должно
+# совпадать с именем функции в AWS. Деплоятся только изменённые директории.
+#
+# Что нужно настроить один раз:
+#   1. В AWS создать OIDC identity provider для token.actions.githubusercontent.com
+#      (audience sts.amazonaws.com) и IAM-роль, которой доверяет
+#      repo:BelovN/lambdas:ref:refs/heads/main, с правами
+#      lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration,
+#      lambda:GetFunction на нужные функции.
+#   2. Settings → Secrets and variables → Actions:
+#        secret AWS_ROLE_ARN  — ARN этой роли
+#        variable AWS_REGION  — регион лямбд (по умолчанию us-east-1)
+
+name: Deploy Lambdas
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      functions:
+        description: "Имена функций через пробел (пусто — задеплоить все)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-lambdas-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Определить изменённые функции
+    runs-on: ubuntu-latest
+    outputs:
+      functions: ${{ steps.detect.outputs.functions }}
+      any: ${{ steps.detect.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_FUNCTIONS: ${{ inputs.functions }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t ALL < <(
+            find . -mindepth 2 -maxdepth 2 -name lambda_function.py -printf '%h\n' \
+              | sed 's|^\./||' | sort
+          )
+
+          # Оставляет из stdin только строки, которые реально являются директориями функций
+          pick() { grep -Fxf <(printf '%s\n' "${ALL[@]}") || true; }
+
+          if [ "$EVENT" = workflow_dispatch ] && [ -n "$INPUT_FUNCTIONS" ]; then
+            SELECTED=$(printf '%s\n' $INPUT_FUNCTIONS | pick)
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            SELECTED=$(printf '%s\n' "${ALL[@]}")
+          elif [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            SELECTED=$(git diff --name-only "$BEFORE" "$SHA" | cut -s -d/ -f1 | sort -u | pick)
+          else
+            # первый пуш в ветку или force-push: базы для diff нет, деплоим всё
+            SELECTED=$(printf '%s\n' "${ALL[@]}")
+          fi
+
+          JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' | jq -R . | jq -sc .)
+          echo "Функции к деплою: $JSON"
+          echo "functions=$JSON" >> "$GITHUB_OUTPUT"
+          if [ "$JSON" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    name: Деплой ${{ matrix.function }}
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        function: ${{ fromJSON(needs.detect.outputs.functions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: gha-deploy-${{ matrix.function }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Собрать zip
+        env:
+          FUNCTION: ${{ matrix.function }}
+        run: |
+          set -euo pipefail
+          cd "$FUNCTION"
+          zip -r "$RUNNER_TEMP/$FUNCTION.zip" . \
+            -x '*.pyc' -x '__pycache__/*' -x '.DS_Store'
+
+      - name: Обновить код функции
+        env:
+          FUNCTION: ${{ matrix.function }}
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$FUNCTION" \
+            --zip-file "fileb://$RUNNER_TEMP/$FUNCTION.zip" \
+            --publish \
+            --no-cli-pager
+          aws lambda wait function-updated --function-name "$FUNCTION"
+
+      # Секрет LAMBDA_ENV_<ИМЯ_ФУНКЦИИ> (верхний регистр, дефисы → подчёркивания)
+      # должен быть JSON-объектом {"VAR": "value"}. Он ПОЛНОСТЬЮ заменяет карту
+      # переменных окружения функции — правки через консоль AWS будут затёрты.
+      # Если секрета нет, шаг ничего не делает.
+      - name: Обновить переменные окружения
+        env:
+          FUNCTION: ${{ matrix.function }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: |
+          set -euo pipefail
+
+          KEY="LAMBDA_ENV_$(printf '%s' "$FUNCTION" | tr 'a-z-' 'A-Z_')"
+          VALUE=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$KEY" '.[$k] // empty')
+
+          if [ -z "$VALUE" ]; then
+            echo "Секрет $KEY не задан — переменные окружения не трогаем."
+            exit 0
+          fi
+
+          if ! printf '%s' "$VALUE" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            echo "::error::Секрет $KEY должен быть JSON-объектом вида {\"VAR\": \"value\"}"
+            exit 1
+          fi
+
+          # GitHub маскирует секрет целиком, но не отдельные поля внутри JSON
+          printf '%s' "$VALUE" | jq -r '.[] | tostring' | while IFS= read -r v; do
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+
+          printf '%s' "$VALUE" | jq -c '{Variables: map_values(tostring)}' \
+            > "$RUNNER_TEMP/env.json"
+
+          aws lambda update-function-configuration \
+            --function-name "$FUNCTION" \
+            --environment "file://$RUNNER_TEMP/env.json" \
+            --no-cli-pager >/dev/null
+          aws lambda wait function-updated --function-name "$FUNCTION"
+
+          echo "Переменных окружения обновлено: $(printf '%s' "$VALUE" | jq 'length')"
