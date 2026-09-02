@@ -128,23 +128,68 @@ jobs:
             pip install --quiet --requirement "$BUILD/requirements.txt" --target "$BUILD"
             rm "$BUILD/requirements.txt"
           fi
+          rm -f "$BUILD/deploy.json"
 
           cd "$BUILD"
           zip -qr "$RUNNER_TEMP/$FUNCTION.zip" . \
             -x '*.pyc' -x '*__pycache__*' -x '.DS_Store'
           unzip -l "$RUNNER_TEMP/$FUNCTION.zip" | tail -1
 
-      - name: Обновить код функции
+      # Существующая функция обновляется; отсутствующая создаётся из deploy.json.
+      # Без deploy.json создать нечего — это осознанная ошибка, а не тихий пропуск.
+      - name: Создать или обновить функцию
         env:
           FUNCTION: ${{ matrix.name }}
         run: |
           set -euo pipefail
-          aws lambda update-function-code \
+          ZIP="$RUNNER_TEMP/$FUNCTION.zip"
+
+          if aws lambda get-function --function-name "$FUNCTION" >/dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name "$FUNCTION" \
+              --zip-file "fileb://$ZIP" \
+              --publish \
+              --no-cli-pager >/dev/null
+            aws lambda wait function-updated --function-name "$FUNCTION"
+            echo "Код функции обновлён."
+            exit 0
+          fi
+
+          CFG="$FUNCTION/deploy.json"
+          if [ ! -f "$CFG" ]; then
+            echo "::error::Функции $FUNCTION нет в AWS, а $CFG отсутствует — создавать не из чего."
+            exit 1
+          fi
+
+          aws lambda create-function \
             --function-name "$FUNCTION" \
-            --zip-file "fileb://$RUNNER_TEMP/$FUNCTION.zip" \
+            --runtime "$(jq -r '.runtime' "$CFG")" \
+            --role "$(jq -r '.role' "$CFG")" \
+            --handler "$(jq -r '.handler' "$CFG")" \
+            --architectures "$(jq -r '.architecture // "x86_64"' "$CFG")" \
+            --timeout "$(jq -r '.timeout // 30' "$CFG")" \
+            --memory-size "$(jq -r '.memory_size // 128' "$CFG")" \
+            --zip-file "fileb://$ZIP" \
             --publish \
-            --no-cli-pager
-          aws lambda wait function-updated --function-name "$FUNCTION"
+            --no-cli-pager >/dev/null
+          aws lambda wait function-active-v2 --function-name "$FUNCTION"
+          echo "Функция создана."
+
+          if [ "$(jq -r '.function_url // false' "$CFG")" = "true" ]; then
+            aws lambda add-permission \
+              --function-name "$FUNCTION" \
+              --statement-id FunctionURLAllowPublicAccess \
+              --action lambda:InvokeFunctionUrl \
+              --principal '*' \
+              --function-url-auth-type NONE \
+              --no-cli-pager >/dev/null
+            URL=$(aws lambda create-function-url-config \
+              --function-name "$FUNCTION" \
+              --auth-type NONE \
+              --query FunctionUrl --output text)
+            echo "Function URL: $URL"
+            echo "Function URL: $URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Секрет LAMBDA_ENV_<ИМЯ_ФУНКЦИИ> (верхний регистр, дефисы → подчёркивания)
       # должен быть JSON-объектом {"VAR": "value"}. Он ПОЛНОСТЬЮ заменяет карту

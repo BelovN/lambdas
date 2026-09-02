@@ -1,0 +1,9 @@
+{
+  "runtime": "python3.13",
+  "handler": "lambda_function.lambda_handler",
+  "role": "arn:aws:iam::174444914513:role/defa-luci-role-iy4dhc6v",
+  "architecture": "x86_64",
+  "timeout": 15,
+  "memory_size": 256,
+  "function_url": true
+}

@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 One directory per AWS Lambda function, each a self-contained deployment bundle. There is no shared package, no build system, and no test suite — a directory is the unit of deploy.
 
 - `defa-luci/` — polls the `dolls` collection on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
+- `telegram-mcp/` — stateless MCP server behind a Lambda Function URL, exposing one `send_notification` tool that relays a message to Telegram.
 
-A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects) and an optional `requirements.txt`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
+A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects), an optional `requirements.txt`, and an optional `deploy.json`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
 
 Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. `defa-luci` runs `python3.13` on `x86_64`.
 
@@ -18,7 +19,11 @@ The `actions/setup-python` version in the deploy workflow must match the Lambda 
 
 Deploys are automatic: pushing or merging to `main` triggers `.github/workflows/deploy.yml`.
 
-The workflow diffs the push against its base, deploys only the directories that changed, and runs one matrix job per function with `fail-fast: false`. Each job installs the function's `requirements.txt` into a staging copy, zips it, and uploads. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
+The workflow diffs the push against its base, deploys only the directories that changed, and runs one matrix job per function with `fail-fast: false`. Each job installs the function's `requirements.txt` into a staging copy, zips it, and uploads.
+
+A function that already exists in AWS gets `update-function-code`. One that does not is created from `deploy.json` (`runtime`, `role`, `handler`, `architecture`, `timeout`, `memory_size`, and `function_url`), and a directory with no `deploy.json` fails the job rather than being skipped quietly. `deploy.json` is build metadata and is stripped from the bundle. Creation is a one-time path: editing `deploy.json` afterwards changes nothing, because the workflow never reconfigures an existing function — adjust it in AWS, or delete and let the next deploy recreate it.
+
+Both existing functions currently share the execution role `defa-luci-role-iy4dhc6v`, which only grants CloudWatch Logs. It is named after one function but used by both; giving `telegram-mcp` its own role would be an improvement. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
 
 AWS auth is OIDC: secret `AWS_ROLE_ARN` plus repository variable `AWS_REGION` (defaults to `eu-north-1`, where the functions live). The IAM role needs `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration` and `lambda:GetFunction`. Setup steps are documented in the workflow's header comment — note in particular that GitHub now issues subject claims containing numeric owner and repo ids (`repo:OWNER@ID/REPO@ID:ref:...`); a trust policy written against the old `repo:OWNER/REPO:ref:...` form fails with `AccessDenied`.
 
@@ -31,6 +36,21 @@ The workflow passes exactly one secret per job, addressed by a name the `detect`
 That call **replaces the whole environment map**, so the secret is the single source of truth: anything set by hand in the AWS console is wiped on the next deploy, and removing a variable means removing it from the JSON. A function with no such secret keeps whatever environment it already has.
 
 `defa-luci` expects `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_IDS` (comma-separated).
+
+## telegram-mcp design
+
+A single Lambda Function URL speaks MCP's Streamable HTTP transport. The 2026-07-28 revision made the protocol core stateless — `initialize`/`initialized` and `Mcp-Session-Id` were retired — which is what makes one request per invocation viable with no session store. `dispatch` still answers `initialize` so clients on 2025-06-18 and 2025-03-26 connect, echoing back whichever version the client asked for when it is supported.
+
+There is no MCP SDK in the bundle: the server implements the JSON-RPC surface it needs (`initialize`, `ping`, `tools/list`, `tools/call`) directly, which is a few dozen lines against a dependency that assumes a long-lived process.
+
+Things worth knowing before changing this:
+
+- **Auth fails closed.** An unset `MCP_AUTH_TOKEN` raises rather than defaulting to open, so a misconfigured deploy returns 500 instead of exposing a public endpoint that spams Telegram. Keep it that way — the Function URL itself is `AuthType: NONE`, so this check is the only thing guarding it. Tokens are compared with `hmac.compare_digest`.
+- **Tool failures are results, not protocol errors.** A Telegram outage returns `isError: true` inside a 200 so the model can see and report it; JSON-RPC error codes are reserved for malformed or unknown requests.
+- **The bot token must never reach a response.** Same trap as `defa-luci`: `requests` embeds the URL in `HTTPError` messages. Route new error text through `redact()`.
+- **Batching is rejected.** JSON-RPC batches were removed from MCP in 2025-06-18, so a top-level array gets `-32600`.
+
+Environment: `MCP_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_IDS` (comma-separated).
 
 ## defa-luci design
 
