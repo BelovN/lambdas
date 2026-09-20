@@ -4,16 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-One directory per AWS Lambda function, each a self-contained deployment bundle. There is no shared package, no build system, and no test suite — a directory is the unit of deploy.
+One directory per AWS Lambda function, each a self-contained deployment bundle. There is no shared package and no build system — a directory is the unit of deploy.
 
 - `defa-luci/` — polls the `dolls` collection on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
 - `telegram-mcp/` — stateless MCP server behind a Lambda Function URL, exposing one `send_notification` tool that relays a message to Telegram.
+- `tests/` — pytest suite covering the pure logic of every function plus the repository conventions below. It is never deployed: the deploy workflow only picks up directories holding a `lambda_function.py`.
+- `REVIEW.md` — the review checklist the PR-review workflow follows.
 
-A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects), an optional `requirements.txt`, and an optional `deploy.json`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
+A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects), an optional `requirements.txt`, and a `deploy.json`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
 
-Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. `defa-luci` runs `python3.13` on `x86_64`.
+Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. Both functions run `python3.13` on `x86_64`.
 
-The `actions/setup-python` version in the deploy workflow must match the Lambda runtime. `pip` resolves interpreter-specific wheels — `charset_normalizer`, pulled in by `requests`, ships a `cp313` binary wheel — so building on a different Python produces a bundle that fails at import time with `Runtime.ImportModuleError`.
+The build Python must match the Lambda runtime. `pip` resolves interpreter-specific wheels — `charset_normalizer`, pulled in by `requests`, ships a `cp313` binary wheel — so building on a different Python produces a bundle that fails at import time with `Runtime.ImportModuleError`. Both workflows therefore read `runtime` and `architecture` out of each function's `deploy.json` and feed them to `actions/setup-python` and `pip`; nothing is hardcoded. An `arm64` function is built with explicit `--platform manylinux2014_aarch64 --only-binary=:all:` because the runner is `x86_64`.
+
+## Checks
+
+`.github/workflows/ci.yml` runs on every pull request and needs no AWS credentials:
+
+- `ruff check .` — config in `pyproject.toml`, line length 100. Formatting is not enforced.
+- `pytest` — `tests/`, no network. `tests/conftest.py` loads each `lambda_function.py` under a distinct module name, since the directories are bundles rather than packages.
+- One bundle job per function: it builds the zip exactly as the deploy does, then imports `lambda_function` on the function's own Python. This is what closes the documented failure mode below, where a bundle missing a dependency deploys green and dies on cold start.
+
+`tests/test_repo_conventions.py` enforces the rules a new directory has to satisfy — a valid function name, a callable `lambda_handler`, a complete `deploy.json`, a runtime new enough for the syntax, pinned requirements, a request timeout that fits inside the Lambda timeout, and no committed secret. A new Lambda still needs no workflow edits; it does need to satisfy these.
+
+Run the same checks locally with `pip install -r requirements-dev.txt && ruff check . && pytest`.
 
 ## Deploy
 
@@ -22,6 +36,18 @@ Deploys are automatic: pushing or merging to `main` triggers `.github/workflows/
 The workflow diffs the push against its base, deploys only the directories that changed, and runs one matrix job per function with `fail-fast: false`. Each job installs the function's `requirements.txt` into a staging copy, zips it, and uploads.
 
 A function that already exists in AWS gets `update-function-code`. One that does not is created from `deploy.json` (`runtime`, `role`, `handler`, `architecture`, `timeout`, `memory_size`, and `function_url`), and a directory with no `deploy.json` fails the job rather than being skipped quietly. `deploy.json` is build metadata and is stripped from the bundle. Creation is a one-time path: editing `deploy.json` afterwards changes nothing, because the workflow never reconfigures an existing function — adjust it in AWS, or delete and let the next deploy recreate it.
+
+Because of that, `deploy.json` is a record of *intended* state, not a mirror of AWS. `telegram-mcp/deploy.json` says `timeout: 30`; the live function was created with 15 and still has it. Reconcile in the console.
+
+## Review and merge
+
+Pull requests are the working unit — `main` is deployed on merge, so nothing lands on it unreviewed.
+
+- `.github/workflows/ci.yml` — the checks above, on every PR.
+- `.github/workflows/claude-review.yml` — reviews each PR against `REVIEW.md`. Edit the checklist there, not the workflow prompt.
+- `.github/workflows/claude.yml` — responds to `@claude` in an issue, a PR comment or a review thread, and pushes fixes to the PR branch.
+
+Both Claude workflows need the GitHub App installed and an `ANTHROPIC_API_KEY` secret. Without them the jobs fail; CI and deploy are unaffected.
 
 Both existing functions currently share the execution role `defa-luci-role-iy4dhc6v`, which only grants CloudWatch Logs. It is named after one function but used by both; giving `telegram-mcp` its own role would be an improvement. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
 
@@ -75,9 +101,10 @@ Things worth knowing before changing this:
 - **Silent empty results are the expected failure mode.** If the collection handle changes or the store stops exposing `products.json`, the handler returns `available_count: 0` with a 200, not an error. Verify against the live feed rather than trusting a green run.
 - **The function has no memory.** Every invocation notifies about everything currently in stock, so it will re-send the same dolls on every schedule tick. Any deduplication would need external state (DynamoDB, S3) that does not exist yet.
 - **Never let the bot token reach a response body.** `requests` embeds the full URL in `HTTPError` messages, and the Telegram API URL contains the token. `redact()` exists for exactly this; route any new error text through it.
-- **A deploy that drops a dependency fails silently until invocation.** `update-function-code` succeeds regardless; the function then dies on cold start with `Runtime.ImportModuleError`. After changing the bundle's contents, invoke once and read the log rather than trusting a green workflow run.
+- **A deploy that drops a dependency fails silently until invocation.** `update-function-code` succeeds regardless; the function then dies on cold start with `Runtime.ImportModuleError`. The CI bundle job and the deploy's own import check now catch this before the upload, but neither runs the handler — after changing the bundle's contents, invoke once and read the log rather than trusting a green workflow run.
 - **The message is not chunked.** Telegram rejects messages over 4096 characters, so a large restock currently fails the send and returns a 502.
+- **One failing chat id aborts the whole send.** Unlike `telegram-mcp`, which reports partial delivery, `send_telegram_messages` raises on the first failure: chats already messaged are reported as a total failure, and the next run re-sends to them. Pinned by `test_a_failing_chat_currently_aborts_the_whole_send`.
 
 `lambda_handler` maps failures to status codes: `HTTPError` → 502, other `RequestException` → 502, anything else (including missing configuration) → 500. All responses are built by `json_response` and serialized with `ensure_ascii=False`.
 
-Code comments are in English. User-facing Telegram strings are in Russian — keep them that way.
+Code comments are in English. User-facing Telegram strings are in Russian — keep them that way. Workflow comments, `REVIEW.md` and review output are in Russian.
