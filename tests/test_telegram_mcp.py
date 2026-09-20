@@ -44,8 +44,6 @@ def rpc(method, params=None, request_id=1):
     return request
 
 
-# --- auth ---------------------------------------------------------------
-
 
 def test_missing_credentials_are_rejected():
     response = post(rpc("ping"))
@@ -79,8 +77,6 @@ def test_get_is_not_served():
     assert response["statusCode"] == 405
     assert response["headers"]["Allow"] == "POST"
 
-
-# --- protocol -----------------------------------------------------------
 
 
 def test_server_discover_is_implemented():
@@ -141,8 +137,6 @@ def test_unknown_tool_is_invalid_params():
     error = body_of(authed(rpc("tools/call", {"name": "nope", "arguments": {}})))["error"]
     assert error["code"] == mcp.INVALID_PARAMS
 
-
-# --- tool ---------------------------------------------------------------
 
 
 class FakeResponse:

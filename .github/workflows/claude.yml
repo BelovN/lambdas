@@ -1,9 +1,5 @@
-# Claude по упоминанию @claude в issue, в PR или в комментарии к ревью.
-#
-# Так вносятся правки после ревью: пишешь «@claude поправь X» в треде — Claude
-# правит код в ветке PR и пушит. Так же можно попросить новую функцию в issue.
-#
-# Требует того же, что и claude-review.yml: GitHub App + CLAUDE_CODE_OAUTH_TOKEN.
+# Answers @claude in an issue, a pull request, or a review thread, and pushes
+# fixes to the branch. Needs the same setup as claude-review.yml.
 
 name: Claude
 
@@ -26,8 +22,8 @@ permissions:
 
 jobs:
   claude:
-    name: Ответить на @claude
-    # Без этого условия джоба запускается на каждый комментарий в репозитории.
+    name: Answer @claude
+    # Without this the job starts on every comment in the repository.
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -42,22 +38,19 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # github_token здесь НЕ передаётся сознательно: на коммиты, сделанные
-          # дефолтным GITHUB_TOKEN, GitHub не запускает workflow. С ним пуш
-          # Claude в ветку PR не прогонял бы CI — ровно то, ради чего он есть.
+          # github_token is deliberately not passed: GitHub does not trigger
+          # workflows on commits made with the default GITHUB_TOKEN, so CI
+          # would never run on the fixes pushed from here.
           claude_args: |
             --allowed-tools "Bash(pip install:*),Bash(python -m pytest:*),Bash(pytest:*),Bash(ruff:*),Bash(python:*)"
           prompt: |
-            Прочитай CLAUDE.md и REVIEW.md перед тем, как что-то менять.
+            Read CLAUDE.md and REVIEW.md before changing anything.
 
-            Перед пушем прогони локально то же, что гоняет CI:
+            Before pushing, run what CI runs:
               pip install --requirement requirements-dev.txt
               ruff check .
               pytest
 
-            Новая lambda-функция — это новая директория с lambda_function.py,
-            requirements.txt и deploy.json. Правки в deploy.yml для этого не
-            нужны. Тесты в tests/ обязательны: tests/test_repo_conventions.py
-            проверит структуру сам, но логику новой функции покрой отдельно.
-
-            Пиши по-русски.
+            A new Lambda is a new directory with lambda_function.py,
+            requirements.txt and deploy.json. deploy.yml needs no edits for
+            it. Cover the new function with tests in tests/.

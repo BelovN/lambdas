@@ -1,10 +1,8 @@
 """Contract for markdown_to_telegram_html.
 
 Only Telegram can decide whether markup parses, so every expectation here was
-checked against the live API first. These tests pin that verified behaviour;
-they do not re-derive it. If Telegram's HTML mode ever changes, re-check
-against the API and update the expectation — do not "fix" the renderer to
-match a guess.
+checked against the live API first. If Telegram's HTML mode changes, re-check
+against the API rather than "fixing" the renderer to match a guess.
 """
 
 import pytest

@@ -1,15 +1,7 @@
-# Автоматическое ревью каждого PR.
+# Reviews every pull request against REVIEW.md.
 #
-# Что нужно настроить один раз:
-#   1. Поставить GitHub App: https://github.com/apps/claude
-#   2. Локально выполнить `claude setup-token` и положить результат в
-#      Settings → Secrets and variables → Actions → secret
-#      CLAUDE_CODE_OAUTH_TOKEN. Это токен подписки, отдельный API-ключ
-#      покупать не нужно. Кому удобнее ключ — заменить на
-#      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}.
-#
-# Правила ревью, специфичные для этого репозитория, лежат в REVIEW.md —
-# правь их там, а не в промпте ниже.
+# Setup: install https://github.com/apps/claude, run `claude setup-token`, and
+# store the result as the CLAUDE_CODE_OAUTH_TOKEN secret.
 
 name: Claude review
 
@@ -22,7 +14,6 @@ permissions:
   pull-requests: write
   issues: read
   id-token: write
-  # Чтобы ревьюер мог посмотреть результаты CI по этому же PR.
   actions: read
 
 concurrency:
@@ -31,8 +22,7 @@ concurrency:
 
 jobs:
   review:
-    name: Ревью PR
-    # Драфты не ревьюим: автор ещё пишет.
+    name: Review
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
@@ -44,24 +34,18 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
-          # Без этой строки MCP-сервер инлайн-комментариев не стартует, и
-          # ревью уезжает только в лог запуска — на PR не появится ничего.
+          # Without this the inline-comment MCP server never starts and the
+          # review goes to the run log instead of the pull request.
           claude_args: >-
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
           prompt: |
-            Отревьюй этот pull request.
+            Review this pull request.
 
-            Прочитай CLAUDE.md и REVIEW.md в корне репозитория: там описаны
-            устройство репозитория и чек-лист ревью, специфичный для него.
-            REVIEW.md — главный источник правил, следуй ему.
+            Read CLAUDE.md and REVIEW.md first. REVIEW.md is this repository's
+            checklist and takes precedence.
 
-            Формат ответа:
-            - Инлайн-комментарии по конкретным строкам для конкретных находок.
-            - В сводке — вердикт одной строкой и список находок по убыванию
-              важности. Помечай каждую находку как blocking или nit.
-            - Не комментируй то, что уже проверено тестами или линтером в CI:
-              это шум. Ищи то, что автоматика поймать не может.
-            - Если замечаний нет — так и напиши одной строкой, без выдуманных
-              придирок.
-
-            Пиши по-русски.
+            Leave inline comments on the lines they concern. In the summary,
+            give a one-line verdict and list findings by importance, each
+            marked blocking or nit. Skip anything ruff or pytest already
+            covers. If there is nothing to report, say so in one line rather
+            than inventing a nit.

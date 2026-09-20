@@ -1,7 +1,5 @@
-# Проверки на каждый PR. Задача — поймать здесь то, что иначе всплывёт только
-# при холодном старте лямбды в проде.
-#
-# В AWS ничего не ходит и креды не нужны: только сборка бандла и тесты.
+# Runs on every pull request. Needs no AWS credentials: it only builds the
+# bundles and runs the tests.
 
 name: CI
 
@@ -20,7 +18,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    name: Линт и тесты
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,17 +30,11 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - run: pip install --requirement requirements-dev.txt
+      - run: ruff check --output-format=github .
+      - run: pytest
 
-      - name: ruff
-        run: ruff check --output-format=github .
-
-      - name: pytest
-        run: pytest
-
-  # Директории функций определяются так же, как в deploy.yml: по наличию
-  # lambda_function.py. Новая функция подхватывается без правок workflow.
   detect:
-    name: Определить функции
+    name: Detect functions
     runs-on: ubuntu-latest
     outputs:
       functions: ${{ steps.detect.outputs.functions }}
@@ -62,11 +54,10 @@ jobs:
           )
           echo "functions=$JSON" >> "$GITHUB_OUTPUT"
 
-  # Самая ценная проверка: update-function-code принимает любой zip, и функция
-  # с потерянной зависимостью падает только при вызове, уже в проде. Здесь
-  # бандл собирается ровно как в деплое и импортируется.
+  # update-function-code accepts any zip, so a bundle missing a dependency only
+  # fails when the function is invoked. Build it here and import it.
   bundle:
-    name: Сборка ${{ matrix.name }}
+    name: Bundle ${{ matrix.name }}
     needs: detect
     runs-on: ubuntu-latest
     strategy:
@@ -80,7 +71,7 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
-      - name: Собрать и импортировать бандл
+      - name: Build and import the bundle
         env:
           FUNCTION: ${{ matrix.name }}
         run: |
@@ -96,13 +87,11 @@ jobs:
           fi
           rm -f "$BUILD/deploy.json"
 
-          # То же, что делает рантайм на холодном старте.
-          ( cd "$BUILD" && python -c 'import lambda_function as m; assert callable(m.lambda_handler), "lambda_handler is not callable"; print("import ok")' )
+          ( cd "$BUILD" && python -c 'import lambda_function as m; assert callable(m.lambda_handler)' )
 
           UNPACKED=$(du -sb "$BUILD" | cut -f1)
-          echo "Распакованный бандл: $((UNPACKED / 1024 / 1024)) MiB"
-          # Лимит AWS на распакованный размер — 250 MiB.
+          echo "Unpacked bundle: $((UNPACKED / 1024 / 1024)) MiB"
           if [ "$UNPACKED" -gt $((250 * 1024 * 1024)) ]; then
-            echo "::error::Бандл $FUNCTION больше лимита AWS в 250 MiB"
+            echo "::error::$FUNCTION exceeds the 250 MiB unpacked limit"
             exit 1
           fi
