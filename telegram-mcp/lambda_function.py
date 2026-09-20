@@ -292,7 +292,9 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
     is_notification = "id" not in request
 
     if request.get("jsonrpc") != "2.0" or not isinstance(method, str):
-        return None if is_notification else rpc_error(request_id, INVALID_REQUEST, "Invalid JSON-RPC request")
+        if is_notification:
+            return None
+        return rpc_error(request_id, INVALID_REQUEST, "Invalid JSON-RPC request")
 
     if is_notification:
         # notifications/initialized and friends: accepted, nothing to answer.
@@ -313,7 +315,8 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "initialize":
         requested = (request.get("params") or {}).get("protocolVersion")
-        negotiated = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
+        supported = requested in SUPPORTED_PROTOCOL_VERSIONS
+        negotiated = requested if supported else LATEST_PROTOCOL_VERSION
         return rpc_result(
             request_id,
             {
@@ -386,7 +389,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         if not isinstance(request, dict):
             # JSON-RPC batching was removed from MCP in 2025-06-18.
-            return http_response(400, rpc_error(None, INVALID_REQUEST, "Expected a single JSON-RPC object"))
+            error = rpc_error(None, INVALID_REQUEST, "Expected a single JSON-RPC object")
+            return http_response(400, error)
 
         print(f"rpc method={request.get('method')!r} id={request.get('id')!r}")
 
