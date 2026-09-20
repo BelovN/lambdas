@@ -2,7 +2,11 @@
 #
 # Что нужно настроить один раз:
 #   1. Поставить GitHub App: https://github.com/apps/claude
-#   2. Settings → Secrets and variables → Actions → secret ANTHROPIC_API_KEY
+#   2. Локально выполнить `claude setup-token` и положить результат в
+#      Settings → Secrets and variables → Actions → secret
+#      CLAUDE_CODE_OAUTH_TOKEN. Это токен подписки, отдельный API-ключ
+#      покупать не нужно. Кому удобнее ключ — заменить на
+#      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}.
 #
 # Правила ревью, специфичные для этого репозитория, лежат в REVIEW.md —
 # правь их там, а не в промпте ниже.
@@ -18,6 +22,8 @@ permissions:
   pull-requests: write
   issues: read
   id-token: write
+  # Чтобы ревьюер мог посмотреть результаты CI по этому же PR.
+  actions: read
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
@@ -36,9 +42,12 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
+          # Без этой строки MCP-сервер инлайн-комментариев не стартует, и
+          # ревью уезжает только в лог запуска — на PR не появится ничего.
+          claude_args: >-
+            --allowedTools "mcp__github_inline_comment__create_inline_comment"
           prompt: |
             Отревьюй этот pull request.
 

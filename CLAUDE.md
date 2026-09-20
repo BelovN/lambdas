@@ -47,7 +47,7 @@ Pull requests are the working unit — `main` is deployed on merge, so nothing l
 - `.github/workflows/claude-review.yml` — reviews each PR against `REVIEW.md`. Edit the checklist there, not the workflow prompt.
 - `.github/workflows/claude.yml` — responds to `@claude` in an issue, a PR comment or a review thread, and pushes fixes to the PR branch.
 
-Both Claude workflows need the GitHub App installed and an `ANTHROPIC_API_KEY` secret. Without them the jobs fail; CI and deploy are unaffected.
+Both Claude workflows need the GitHub App installed and a `CLAUDE_CODE_OAUTH_TOKEN` secret — a subscription token from `claude setup-token`, not a purchased API key. Swap in `anthropic_api_key` if you would rather bill the API. Neither workflow passes `github_token`: GitHub does not run workflows on commits made with the default `GITHUB_TOKEN`, so passing it would mean CI never runs on the fixes Claude pushes. Without the secret the jobs fail; CI and deploy are unaffected.
 
 Both existing functions currently share the execution role `defa-luci-role-iy4dhc6v`, which only grants CloudWatch Logs. It is named after one function but used by both; giving `telegram-mcp` its own role would be an improvement. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
 
