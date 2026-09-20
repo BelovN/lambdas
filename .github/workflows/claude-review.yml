@@ -1,0 +1,58 @@
+# Автоматическое ревью каждого PR.
+#
+# Что нужно настроить один раз:
+#   1. Поставить GitHub App: https://github.com/apps/claude
+#   2. Settings → Secrets and variables → Actions → secret ANTHROPIC_API_KEY
+#
+# Правила ревью, специфичные для этого репозитория, лежат в REVIEW.md —
+# правь их там, а не в промпте ниже.
+
+name: Claude review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Ревью PR
+    # Драфты не ревьюим: автор ещё пишет.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          track_progress: true
+          prompt: |
+            Отревьюй этот pull request.
+
+            Прочитай CLAUDE.md и REVIEW.md в корне репозитория: там описаны
+            устройство репозитория и чек-лист ревью, специфичный для него.
+            REVIEW.md — главный источник правил, следуй ему.
+
+            Формат ответа:
+            - Инлайн-комментарии по конкретным строкам для конкретных находок.
+            - В сводке — вердикт одной строкой и список находок по убыванию
+              важности. Помечай каждую находку как blocking или nit.
+            - Не комментируй то, что уже проверено тестами или линтером в CI:
+              это шум. Ищи то, что автоматика поймать не может.
+            - Если замечаний нет — так и напиши одной строкой, без выдуманных
+              придирок.
+
+            Пиши по-русски.
