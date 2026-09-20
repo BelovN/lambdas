@@ -216,9 +216,20 @@ def fake_feed(products_by_handle, seen=None):
     return get
 
 
-def test_the_polled_collections_are_dolls_and_series_punk():
-    # Hardcoded on purpose; this pins the pair so a change is deliberate.
-    assert list(luci.COLLECTIONS) == ["dolls", "series-punk-1"]
+def test_the_polled_collections_are_the_doll_ones():
+    # Hardcoded on purpose; this pins the set so a change is deliberate.
+    assert list(luci.COLLECTIONS) == [
+        "dolls",
+        "defa-lucy-collection",
+        "series-punk-1",
+        "defa-lucy-play",
+    ]
+
+
+def test_the_clothing_collections_are_not_polled():
+    # fashion-packs and bodysuits are outfits for the dolls, not dolls.
+    assert "fashion-packs" not in luci.COLLECTIONS
+    assert "bodysuits" not in luci.COLLECTIONS
 
 
 def test_every_configured_collection_is_polled(monkeypatch):
@@ -296,20 +307,19 @@ def test_a_message_built_without_collections_still_renders():
 
 
 def test_the_response_reports_every_polled_collection(monkeypatch):
-    monkeypatch.setattr(
-        luci.requests,
-        "get",
-        fake_feed({"dolls": [product(id=1), product(id=2, handle="b")], "series-punk-1": [product(id=1)]}),
-    )
-    monkeypatch.setattr(
-        luci.requests,
-        "post",
-        lambda *a, **kw: FakeTelegram(),
-    )
+    feed = {handle: [] for handle in luci.COLLECTIONS}
+    feed["dolls"] = [product(id=1), product(id=2, handle="b")]
+    feed["series-punk-1"] = [product(id=1)]
+
+    monkeypatch.setattr(luci.requests, "get", fake_feed(feed))
+    monkeypatch.setattr(luci.requests, "post", lambda *a, **kw: FakeTelegram())
+
     body = json.loads(luci.lambda_handler({}, None)["body"])
-    assert body["collections"] == ["dolls", "series-punk-1"]
+    assert body["collections"] == list(luci.COLLECTIONS)
     assert body["source_urls"]["series-punk-1"] == f"{luci.BASE_URL}/collections/series-punk-1"
-    assert body["checked_products_by_collection"] == {"dolls": 2, "series-punk-1": 1}
+    assert body["checked_products_by_collection"] == {
+        handle: len(products) for handle, products in feed.items()
+    }
     assert body["checked_products"] == 3
     # The doll in both collections is counted once.
     assert body["available_count"] == 2
@@ -335,4 +345,9 @@ def test_the_worst_case_request_time_fits_the_lambda_timeout():
         (pathlib.Path(__file__).resolve().parent.parent / "defa-luci" / "deploy.json").read_text()
     )
     chats_budgeted = 2
-    assert luci.TIMEOUT_SECONDS * (len(luci.COLLECTIONS) + chats_budgeted) <= config["timeout"]
+    headroom = 10
+    worst_case = luci.TIMEOUT_SECONDS * (len(luci.COLLECTIONS) + chats_budgeted)
+    assert worst_case <= config["timeout"] - headroom, (
+        f"worst case {worst_case}s leaves under {headroom}s of the "
+        f"{config['timeout']}s Lambda timeout"
+    )

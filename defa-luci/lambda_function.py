@@ -7,11 +7,15 @@ import requests
 BASE_URL = "https://defalucy.com"
 
 # Collections polled on every run, in the order their products appear in the
-# message. Hardcoded: the store publishes six collections and only these two
-# carry dolls. Handle -> the Russian label used in the Telegram message.
+# message. Handle -> the label used in the Telegram message. Hardcoded: the
+# store publishes six collections and these are the four that carry dolls.
+# `fashion-packs` and `bodysuits` are clothing for the dolls, not dolls, and
+# are deliberately left out.
 COLLECTIONS: dict[str, str] = {
     "dolls": "Куклы",
+    "defa-lucy-collection": "Defa Lucy Collection",
     "series-punk-1": "Series Punk",
+    "defa-lucy-play": "Defa Lucy Play",
 }
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -24,10 +28,12 @@ HEADERS = {
 }
 JSON_HEADERS = {"Content-Type": "application/json; charset=utf-8"}
 
-# One invocation now makes at least one request per collection before it sends
+# One invocation makes at least one request per collection before it sends
 # anything, so the per-request budget has to leave room for all of them inside
-# the Lambda timeout. Pinned by test_the_worst_case_request_time_fits_the_lambda_timeout.
-TIMEOUT_SECONDS = 10
+# the Lambda timeout, with margin. Four collections plus two chat ids at 8s is
+# 48s of a 60s timeout. Pinned by
+# test_the_worst_case_request_time_fits_the_lambda_timeout.
+TIMEOUT_SECONDS = 8
 PAGE_LIMIT = 250
 
 
