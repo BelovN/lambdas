@@ -1,21 +1,23 @@
-## Что меняется
+## What changes
 
-<!-- Одно-два предложения: что и зачем. -->
+<!-- One or two sentences: what and why. -->
 
-## Затронутые функции
+## Functions affected
 
-<!-- Директории лямбд, которые задеплоятся после мержа. «Нет» — если PR не
-     трогает ни одной: например, только CI или документация. -->
+<!-- The Lambda directories that will deploy on merge. Note that any changed
+     file inside a function directory, deploy.json included, selects it.
+     "None" if the PR touches no function directory. -->
 
-## Проверено
+## Checked
 
-- [ ] `ruff check .` и `pytest` проходят локально
-- [ ] Новая логика покрыта тестами
-- [ ] Новые зависимости закреплены в `requirements.txt` нужной функции
-- [ ] Никакой новый текст ошибки не может вынести наружу токен (`redact()`)
+- [ ] `ruff check .` and `pytest` pass locally
+- [ ] New logic is covered by tests
+- [ ] New dependencies are pinned in the right function's `requirements.txt`
+- [ ] No new error text can leak the bot token (`redact()`)
 
-## Что нужно сделать руками после мержа
+## Manual steps after merge
 
-<!-- Деплой автоматический, но не всё: новый секрет LAMBDA_ENV_<ИМЯ>, правка
-     конфигурации существующей функции в консоли AWS (deploy.json на неё уже
-     не влияет), проверка лога после первого вызова. «Ничего» — если ничего. -->
+<!-- The deploy is automatic, but not everything is: a new LAMBDA_ENV_<NAME>
+     secret, a configuration change in the AWS console (deploy.json no longer
+     affects an existing function), reading the log after the first invoke.
+     "None" if there are none. -->

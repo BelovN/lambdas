@@ -1,77 +1,78 @@
-# Чек-лист ревью
+# Review checklist
 
-Правила ревью для этого репозитория. Их читает Claude в
-`.github/workflows/claude-review.yml` — править правила надо здесь, а не в
-промпте workflow. Устройство репозитория описано в `CLAUDE.md`.
+Review rules for this repository, read by `.github/workflows/claude-review.yml`.
+Change the rules here, not in the workflow prompt. `CLAUDE.md` describes how
+the repository is laid out.
 
-Ревью ищет то, чего не поймают `ruff` и `pytest`. Повторять за ними не нужно.
+Look for what `ruff` and `pytest` cannot catch. Do not repeat them.
 
-## Блокирующее
+## Language
 
-**Секреты.** Токен Telegram никогда не должен попасть ни в ответ, ни в лог.
-`requests` кладёт полный URL в текст `HTTPError`, а URL Telegram содержит
-токен. Любой новый текст ошибки, который уходит наружу, — через `redact()`.
-То же про `MCP_AUTH_TOKEN`: он не должен попасть в `print()` — ни из заголовка
-`Authorization`, ни из query string.
+Everything written into this repository is in English: code, comments, commit
+messages, workflow files, documentation and review output. The only exception
+is user-facing Telegram strings, which stay Russian. Flag any new Russian text
+outside those strings as blocking.
 
-**Неаутентифицированному вызову — ничего о конфигурации.** Function URL
-поднят с `AuthType: NONE`, проверка в коде — единственное, что его закрывает.
-Пока запрос не прошёл авторизацию, ответ не должен называть переменные
-окружения, причины 503 и прочие детали устройства сервера. Причина идёт в
-CloudWatch.
+## Blocking
 
-**Fail closed.** Незаданный `MCP_AUTH_TOKEN` — это 503, а не «открыто всем».
-Сравнение токенов — только `hmac.compare_digest`.
+**Secrets.** The Telegram bot token must never reach a response or a log.
+`requests` puts the full URL into `HTTPError` text, and the Telegram URL
+contains the token, so any new error text that leaves the Lambda goes through
+`redact()`. The same holds for `MCP_AUTH_TOKEN`: it must not be printed, from
+either the `Authorization` header or the query string.
 
-**Фид Shopify не типизирован.** Любое новое чтение поля из него — через
-`.get()` и `isinstance`. Кривой товар пропускается, а не роняет запуск.
+**Nothing about the configuration reaches an unauthenticated caller.** The
+Function URL is `AuthType: NONE`, so the check in the code is the only thing
+guarding it. Until a request is authorized, the response must not name
+environment variables, reasons for a 503, or anything else about how the
+server is set up. The reason goes to CloudWatch.
 
-**Зависимости.** Слоёв в этом аккаунте нет, всё едет внутри zip. Новая
-зависимость — это закреплённая (`==`) строка в `requirements.txt` нужной
-функции. Ничего не вендорится в git.
+**Auth fails closed.** An unset `MCP_AUTH_TOKEN` is a 503, never "open to
+everyone". Tokens are compared with `hmac.compare_digest`.
 
-**Рантайм.** `deploy.json` — источник правды про версию Python и архитектуру;
-CI и деплой берут их оттуда. Не хардкодить версию в workflow.
+**The Shopify feed is untyped.** Every new field read from it goes through
+`.get()` and `isinstance`. A malformed product is skipped, not allowed to
+crash the run.
 
-**Новая функция.** Директория с `lambda_function.py`, `requirements.txt` и
-`deploy.json`. Правки в `deploy.yml` для этого не нужны — если в PR их
-предлагают, это повод спросить зачем. Имя директории обязано совпадать с
-именем функции в AWS.
+**Dependencies.** There are no layers in this account, so everything ships
+inside the zip. A new dependency is a pinned (`==`) line in that function's
+`requirements.txt`. Nothing is vendored into git.
 
-**Тесты.** Новая логика — новые тесты в `tests/`. Чистые функции (разбор фида,
-рендер Markdown, диспетчеризация JSON-RPC) покрываются без сети.
+**`deploy.json` is the source of truth** for runtime and architecture. Do not
+hardcode either in a workflow.
 
-## Что проверять внимательно
+**A new function** is a directory with `lambda_function.py`,
+`requirements.txt` and `deploy.json`. It needs no `deploy.yml` edits — if a PR
+proposes some, ask why. The directory name must equal the AWS function name.
 
-**Telegram.** Проверить разметку может только сам Telegram. Если PR трогает
-`markdown_to_telegram_html`, утверждения про «Telegram это примет» должны
-опираться на живой API, а не на документацию. Потолок сообщения — 4096
-символов; `defa-luci` его не режет и на крупном рестоке упадёт.
+**Tests.** New logic needs new tests in `tests/`. The pure functions — feed
+parsing, Markdown rendering, JSON-RPC dispatch — are testable without network.
 
-**Частичная доставка.** Упавший chat id не должен прерывать цикл по
-остальным. В `telegram-mcp` это сделано, в `defa-luci` — ещё нет.
+## Check carefully
 
-**Ошибки инструмента — не ошибки протокола.** В `telegram-mcp` падение
-Telegram возвращается как `isError: true` внутри 200. Коды JSON-RPC — только
-для некорректных или неизвестных запросов.
+**Telegram.** Only Telegram can validate the markup. If a PR touches
+`markdown_to_telegram_html`, claims that "Telegram accepts this" must rest on
+the live API, not the docs. The message ceiling is 4096 characters; `defa-luci`
+does not chunk and will fail on a large restock.
 
-**Обязательства MCP 2026-07-28.** SDK в бандле нет, всё написано руками:
-`server/discover` обязан отвечать, каждый результат несёт `resultType`,
-списки — `ttlMs` и `cacheScope`, сервер представляется в
+**Partial delivery.** A failing chat id must not abort the loop over the rest.
+`telegram-mcp` does this; `defa-luci` does not yet.
+
+**Tool failures are results, not protocol errors.** In `telegram-mcp` a
+Telegram outage returns `isError: true` inside a 200. JSON-RPC error codes are
+reserved for malformed or unknown requests.
+
+**MCP 2026-07-28 obligations.** There is no SDK in the bundle, so these are met
+by hand: `server/discover` must answer, every result carries `resultType`, list
+results carry `ttlMs` and `cacheScope`, and the server identifies itself in
 `_meta["io.modelcontextprotocol/serverInfo"]`.
 
-**Таймауты.** Таймаут HTTP-запроса должен с запасом помещаться в таймаут
-лямбды, с учётом того, что запросов за один вызов может быть несколько.
+**Timeouts.** A request timeout must fit inside the Lambda timeout with room to
+spare, counting every request one invocation can make.
 
-**Секрет окружения заменяет карту целиком.** `LAMBDA_ENV_<ИМЯ>` —
-единственный источник правды: убрать переменную можно только убрав её из
-JSON, а правки через консоль AWS затираются следующим деплоем.
+**The environment secret replaces the whole map.** `LAMBDA_ENV_<NAME>` is the
+single source of truth: removing a variable means removing it from the JSON,
+and console edits are wiped by the next deploy.
 
-**`toJSON(secrets)` не использовать** ни при каких обстоятельствах — GitHub
-придерживает такие раны как потенциально вредоносные.
-
-## Язык
-
-Комментарии в коде — английские. Строки, которые видит пользователь в
-Telegram, — русские. Комментарии в workflow — русские. Ревью пишется
-по-русски.
+**Never use `toJSON(secrets)`** — GitHub holds such runs as potentially
+malicious.

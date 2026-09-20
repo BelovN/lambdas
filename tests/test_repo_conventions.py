@@ -1,8 +1,7 @@
 """Rules every Lambda directory must satisfy.
 
-A directory is the unit of deploy and the workflow needs no edits to pick up a
-new one — which also means a new directory gets no review from the workflow
-itself. These checks are that review.
+The deploy workflow needs no edits to pick up a new directory, which also means
+it gives a new one no scrutiny. These checks are that scrutiny.
 """
 
 import json
@@ -27,7 +26,6 @@ def test_the_repository_has_functions():
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_directory_name_is_a_valid_lambda_function_name(name):
-    # The workflow deploys to a function named after the directory.
     assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name), name
 
 

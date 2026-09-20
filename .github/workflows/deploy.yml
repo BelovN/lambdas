@@ -1,22 +1,22 @@
-# Деплой лямбд в AWS при пуше/мерже в main.
+# Deploys Lambdas to AWS on push or merge to main.
 #
-# Директория функции — та, где лежит lambda_function.py. Имя директории должно
-# совпадать с именем функции в AWS. Деплоятся только изменённые директории.
+# A function directory is one holding a lambda_function.py, and its name must
+# equal the function name in AWS. Only changed directories are deployed.
 #
-# Что нужно настроить один раз:
-#   1. В AWS создать OIDC identity provider для token.actions.githubusercontent.com
-#      (audience sts.amazonaws.com) и IAM-роль с правами
-#      lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration,
-#      lambda:GetFunction на нужные функции.
-#   2. В trust policy роли условие на sub писать в НОВОМ формате GitHub, где
-#      в клейм подставляются числовые id владельца и репозитория:
+# One-time setup:
+#   1. In AWS, create an OIDC identity provider for
+#      token.actions.githubusercontent.com (audience sts.amazonaws.com) and an
+#      IAM role granting lambda:UpdateFunctionCode,
+#      lambda:UpdateFunctionConfiguration and lambda:GetFunction.
+#   2. Write the role's trust policy sub condition in GitHub's NEW format,
+#      which substitutes numeric owner and repo ids into the claim:
 #        repo:BelovN@68339775/lambdas@1355115369:ref:refs/heads/main
-#      Старый формат repo:BelovN/lambdas:ref:refs/heads/main больше не
-#      совпадает и даёт AccessDenied на sts:AssumeRoleWithWebIdentity.
-#      Реальный sub всегда видно в CloudTrail в событии AssumeRoleWithWebIdentity.
-#   3. Settings → Secrets and variables → Actions:
-#        secret AWS_ROLE_ARN  — ARN этой роли
-#        variable AWS_REGION  — регион лямбд (по умолчанию eu-north-1)
+#      The old repo:BelovN/lambdas:ref:refs/heads/main form no longer matches
+#      and fails sts:AssumeRoleWithWebIdentity with AccessDenied. The real sub
+#      is always visible in the CloudTrail AssumeRoleWithWebIdentity event.
+#   3. Settings -> Secrets and variables -> Actions:
+#        secret AWS_ROLE_ARN  - the ARN of that role
+#        variable AWS_REGION  - the region the Lambdas live in (eu-north-1)
 
 name: Deploy Lambdas
 
@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       functions:
-        description: "Имена функций через пробел (пусто — задеплоить все)"
+        description: "Space-separated function names (empty deploys all)"
         required: false
         default: ""
 
@@ -40,7 +40,7 @@ concurrency:
 
 jobs:
   detect:
-    name: Определить изменённые функции
+    name: Detect changed functions
     runs-on: ubuntu-latest
     outputs:
       functions: ${{ steps.detect.outputs.functions }}
@@ -64,7 +64,7 @@ jobs:
               | sed 's|^\./||' | sort
           )
 
-          # Оставляет из stdin только строки, которые реально являются директориями функций
+          # Keeps only the stdin lines that really are function directories.
           pick() { grep -Fxf <(printf '%s\n' "${ALL[@]}") || true; }
 
           if [ "$EVENT" = workflow_dispatch ] && [ -n "$INPUT_FUNCTIONS" ]; then
@@ -74,13 +74,14 @@ jobs:
           elif [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             SELECTED=$(git diff --name-only "$BEFORE" "$SHA" | cut -s -d/ -f1 | sort -u | pick)
           else
-            # первый пуш в ветку или force-push: базы для diff нет, деплоим всё
+            # First push to a branch, or a force-push: no base to diff against.
             SELECTED=$(printf '%s\n' "${ALL[@]}")
           fi
 
-          # Рантайм и архитектура берутся из deploy.json функции: сборка должна
-          # идти на том же Python и под ту же архитектуру, иначе pip положит в
-          # бандл несовместимые wheel'ы и функция упадёт с ImportModuleError.
+          # Runtime and architecture come from the function's deploy.json: the
+          # build must use the same Python and architecture, or pip puts
+          # incompatible wheels in the bundle and the function dies with
+          # ImportModuleError.
           JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' | while IFS= read -r fn; do
             runtime=$(jq -r '.runtime // "python3.13"' "$fn/deploy.json" 2>/dev/null || echo python3.13)
             arch=$(jq -r '.architecture // "x86_64"' "$fn/deploy.json" 2>/dev/null || echo x86_64)
@@ -90,7 +91,7 @@ jobs:
                 architecture: $arch,
                 env_secret: ("LAMBDA_ENV_" + ($name | ascii_upcase | gsub("-"; "_")))}'
           done | jq -sc .)
-          echo "Функции к деплою: $JSON"
+          echo "Functions to deploy: $JSON"
           echo "functions=$JSON" >> "$GITHUB_OUTPUT"
           if [ "$JSON" = "[]" ]; then
             echo "any=false" >> "$GITHUB_OUTPUT"
@@ -99,7 +100,7 @@ jobs:
           fi
 
   deploy:
-    name: Деплой ${{ matrix.name }}
+    name: Deploy ${{ matrix.name }}
     needs: detect
     if: needs.detect.outputs.any == 'true'
     runs-on: ubuntu-latest
@@ -110,9 +111,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Должна совпадать с рантаймом лямбды: pip тянет wheel'ы под конкретную
-      # версию, и cp312-wheel не импортируется на python3.13. Версия берётся
-      # из deploy.json функции, а не хардкодится здесь.
+      # Must match the Lambda runtime: pip resolves interpreter-specific
+      # wheels, and a cp312 wheel will not import on python3.13.
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python_version }}
@@ -124,7 +124,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
 
       # Dependencies go inside the zip: this account uses no Lambda layers.
-      - name: Собрать zip
+      - name: Build the zip
         env:
           FUNCTION: ${{ matrix.name }}
           ARCH: ${{ matrix.architecture }}
@@ -139,8 +139,8 @@ jobs:
           if [ -f "$BUILD/requirements.txt" ]; then
             PIP_ARGS=(--quiet --requirement "$BUILD/requirements.txt" --target "$BUILD")
             if [ "$ARCH" = arm64 ]; then
-              # Раннер x86_64: под arm64 wheel'ы надо запрашивать явно, иначе в
-              # бандл уедут бинарники не той архитектуры.
+              # The runner is x86_64, so arm64 wheels must be requested
+              # explicitly or the bundle gets the wrong binaries.
               PIP_ARGS+=(--platform manylinux2014_aarch64 --implementation cp
                          --python-version "$PY" --only-binary=:all:)
             fi
@@ -149,12 +149,12 @@ jobs:
           fi
           rm -f "$BUILD/deploy.json"
 
-          # update-function-code примет любой zip, и функция с потерянной
-          # зависимостью упадёт только при вызове. Импортируем здесь — ровно то,
-          # что делает рантайм на холодном старте. Для arm64 проверить нечем.
+          # update-function-code accepts any zip, so a bundle missing a
+          # dependency only fails when the function is invoked. Nothing on an
+          # x86_64 runner can import an arm64 bundle.
           if [ "$ARCH" != arm64 ]; then
             ( cd "$BUILD" && python -c 'import lambda_function as m; assert callable(m.lambda_handler)' )
-            echo "Импорт бандла прошёл."
+            echo "Bundle imports cleanly."
           fi
 
           cd "$BUILD"
@@ -162,9 +162,10 @@ jobs:
             -x '*.pyc' -x '*__pycache__*' -x '.DS_Store'
           unzip -l "$RUNNER_TEMP/$FUNCTION.zip" | tail -1
 
-      # Существующая функция обновляется; отсутствующая создаётся из deploy.json.
-      # Без deploy.json создать нечего — это осознанная ошибка, а не тихий пропуск.
-      - name: Создать или обновить функцию
+      # An existing function is updated; a missing one is created from
+      # deploy.json. Without deploy.json there is nothing to create from, which
+      # fails the job rather than skipping quietly.
+      - name: Create or update the function
         env:
           FUNCTION: ${{ matrix.name }}
         run: |
@@ -178,13 +179,13 @@ jobs:
               --publish \
               --no-cli-pager >/dev/null
             aws lambda wait function-updated --function-name "$FUNCTION"
-            echo "Код функции обновлён."
+            echo "Function code updated."
             exit 0
           fi
 
           CFG="$FUNCTION/deploy.json"
           if [ ! -f "$CFG" ]; then
-            echo "::error::Функции $FUNCTION нет в AWS, а $CFG отсутствует — создавать не из чего."
+            echo "::error::$FUNCTION is not in AWS and $CFG is missing - nothing to create it from."
             exit 1
           fi
 
@@ -200,11 +201,12 @@ jobs:
             --publish \
             --no-cli-pager >/dev/null
           aws lambda wait function-active-v2 --function-name "$FUNCTION"
-          echo "Функция создана."
+          echo "Function created."
 
           if [ "$(jq -r '.function_url // false' "$CFG")" = "true" ]; then
-            # С октября 2025 Function URL требует ОБА разрешения. Без второго
-            # запрос получает 403 даже при auth type NONE.
+            # Since October 2025 a Function URL requires BOTH permissions.
+            # With only the first, every request gets a 403 even with auth
+            # type NONE.
             aws lambda add-permission \
               --function-name "$FUNCTION" \
               --statement-id FunctionURLAllowPublicAccess \
@@ -227,16 +229,16 @@ jobs:
             echo "Function URL: $URL" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Секрет LAMBDA_ENV_<ИМЯ_ФУНКЦИИ> (верхний регистр, дефисы → подчёркивания)
-      # должен быть JSON-объектом {"VAR": "value"}. Он ПОЛНОСТЬЮ заменяет карту
-      # переменных окружения функции — правки через консоль AWS будут затёрты.
-      # Если секрета нет, шаг ничего не делает.
+      # The LAMBDA_ENV_<FUNCTION_NAME> secret (uppercased, hyphens to
+      # underscores) must be a JSON object {"VAR": "value"}. It REPLACES the
+      # function's whole environment map, so edits made in the AWS console are
+      # wiped. With no such secret the step does nothing.
       #
-      # Пробрасывается ровно один секрет, адресованный по имени из матрицы.
-      # toJSON(secrets) здесь использовать нельзя: выгрузка всех секретов разом —
-      # это канонический паттерн эксфильтрации, и GitHub придерживает такие раны
-      # на ручной аппрув как потенциально вредоносные.
-      - name: Обновить переменные окружения
+      # Exactly one secret is passed, addressed by a name from the matrix.
+      # toJSON(secrets) must not be used: dumping every secret at once is the
+      # canonical exfiltration pattern, and GitHub holds such runs for manual
+      # approval as potentially malicious.
+      - name: Update environment variables
         env:
           FUNCTION: ${{ matrix.name }}
           SECRET_NAME: ${{ matrix.env_secret }}
@@ -245,16 +247,16 @@ jobs:
           set -euo pipefail
 
           if [ -z "${LAMBDA_ENV:-}" ]; then
-            echo "Секрет $SECRET_NAME не задан — переменные окружения не трогаем."
+            echo "Secret $SECRET_NAME is not set - leaving the environment alone."
             exit 0
           fi
 
           if ! printf '%s' "$LAMBDA_ENV" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            echo "::error::Секрет $SECRET_NAME должен быть JSON-объектом вида {\"VAR\": \"value\"}"
+            echo "::error::Secret $SECRET_NAME must be a JSON object like {\"VAR\": \"value\"}"
             exit 1
           fi
 
-          # GitHub маскирует секрет целиком, но не отдельные поля внутри JSON
+          # GitHub masks the secret as a whole, but not the fields inside it.
           printf '%s' "$LAMBDA_ENV" | jq -r '.[] | tostring' | while IFS= read -r v; do
             if [ -n "$v" ]; then echo "::add-mask::$v"; fi
           done
@@ -268,4 +270,4 @@ jobs:
             --no-cli-pager >/dev/null
           aws lambda wait function-updated --function-name "$FUNCTION"
 
-          echo "Переменных окружения обновлено: $(printf '%s' "$LAMBDA_ENV" | jq 'length')"
+          echo "Environment variables updated: $(printf '%s' "$LAMBDA_ENV" | jq 'length')"

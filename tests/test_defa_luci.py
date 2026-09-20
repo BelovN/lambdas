@@ -26,8 +26,6 @@ def product(**overrides):
     return base
 
 
-# --- parsing ------------------------------------------------------------
-
 
 def test_a_product_counts_when_any_variant_is_available():
     feed = [product(variants=[{"available": False, "price": "9"}, {"available": True, "price": "9"}])]
@@ -85,8 +83,6 @@ def test_the_product_url_is_built_from_the_store_base():
     )
 
 
-# --- message ------------------------------------------------------------
-
 
 def test_the_message_stays_russian_and_lists_every_product():
     available = luci.extract_available_products([product(title="A"), product(title="B", handle="b")])
@@ -100,8 +96,6 @@ def test_a_product_without_a_price_omits_the_price_line():
     available = luci.extract_available_products([product(variants=[{"available": True}])])
     assert "Цена:" not in luci.build_telegram_message(available)
 
-
-# --- handler ------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)

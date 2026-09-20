@@ -9,7 +9,7 @@ One directory per AWS Lambda function, each a self-contained deployment bundle. 
 - `defa-luci/` — polls the `dolls` collection on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
 - `telegram-mcp/` — stateless MCP server behind a Lambda Function URL, exposing one `send_notification` tool that relays a message to Telegram.
 - `tests/` — pytest suite covering the pure logic of every function plus the repository conventions below. It is never deployed: the deploy workflow only picks up directories holding a `lambda_function.py`.
-- `REVIEW.md` — the review checklist the PR-review workflow follows.
+- `REVIEW.md` — the review checklist the PR-review workflow follows, including the English-only rule above.
 
 A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects), an optional `requirements.txt`, and a `deploy.json`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
 
@@ -107,4 +107,4 @@ Things worth knowing before changing this:
 
 `lambda_handler` maps failures to status codes: `HTTPError` → 502, other `RequestException` → 502, anything else (including missing configuration) → 500. All responses are built by `json_response` and serialized with `ensure_ascii=False`.
 
-Code comments are in English. User-facing Telegram strings are in Russian — keep them that way. Workflow comments, `REVIEW.md` and review output are in Russian.
+Everything written into this repository is in English: code, comments, commit messages, workflow files, documentation and review output. The one exception is user-facing Telegram strings, which stay Russian — keep them that way.
