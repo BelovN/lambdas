@@ -1,0 +1,108 @@
+# Проверки на каждый PR. Задача — поймать здесь то, что иначе всплывёт только
+# при холодном старте лямбды в проде.
+#
+# В AWS ничего не ходит и креды не нужны: только сборка бандла и тесты.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Линт и тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: pip install --requirement requirements-dev.txt
+
+      - name: ruff
+        run: ruff check --output-format=github .
+
+      - name: pytest
+        run: pytest
+
+  # Директории функций определяются так же, как в deploy.yml: по наличию
+  # lambda_function.py. Новая функция подхватывается без правок workflow.
+  detect:
+    name: Определить функции
+    runs-on: ubuntu-latest
+    outputs:
+      functions: ${{ steps.detect.outputs.functions }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          set -euo pipefail
+          JSON=$(
+            find . -mindepth 2 -maxdepth 2 -name lambda_function.py -printf '%h\n' \
+              | sed 's|^\./||' | sort | while IFS= read -r fn; do
+                  runtime=$(jq -r '.runtime // "python3.13"' "$fn/deploy.json" 2>/dev/null \
+                            || echo python3.13)
+                  jq -nc --arg name "$fn" --arg py "${runtime#python}" \
+                     '{name: $name, python_version: $py}'
+                done | jq -sc .
+          )
+          echo "functions=$JSON" >> "$GITHUB_OUTPUT"
+
+  # Самая ценная проверка: update-function-code принимает любой zip, и функция
+  # с потерянной зависимостью падает только при вызове, уже в проде. Здесь
+  # бандл собирается ровно как в деплое и импортируется.
+  bundle:
+    name: Сборка ${{ matrix.name }}
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect.outputs.functions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Собрать и импортировать бандл
+        env:
+          FUNCTION: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+
+          BUILD="$RUNNER_TEMP/build/$FUNCTION"
+          mkdir -p "$BUILD"
+          cp -R "$FUNCTION/." "$BUILD/"
+
+          if [ -f "$BUILD/requirements.txt" ]; then
+            pip install --quiet --requirement "$BUILD/requirements.txt" --target "$BUILD"
+            rm "$BUILD/requirements.txt"
+          fi
+          rm -f "$BUILD/deploy.json"
+
+          # То же, что делает рантайм на холодном старте.
+          ( cd "$BUILD" && python -c 'import lambda_function as m; assert callable(m.lambda_handler), "lambda_handler is not callable"; print("import ok")' )
+
+          UNPACKED=$(du -sb "$BUILD" | cut -f1)
+          echo "Распакованный бандл: $((UNPACKED / 1024 / 1024)) MiB"
+          # Лимит AWS на распакованный размер — 250 MiB.
+          if [ "$UNPACKED" -gt $((250 * 1024 * 1024)) ]; then
+            echo "::error::Бандл $FUNCTION больше лимита AWS в 250 MiB"
+            exit 1
+          fi
