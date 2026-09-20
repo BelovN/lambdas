@@ -5,9 +5,15 @@ from typing import Any
 import requests
 
 BASE_URL = "https://defalucy.com"
-COLLECTION_HANDLE = "dolls"
-COLLECTION_API_URL = f"{BASE_URL}/collections/{COLLECTION_HANDLE}/products.json"
-COLLECTION_PAGE_URL = f"{BASE_URL}/collections/{COLLECTION_HANDLE}"
+
+# Collections polled on every run, in the order their products appear in the
+# message. Hardcoded: the store publishes six collections and only these two
+# carry dolls. Handle -> the Russian label used in the Telegram message.
+COLLECTIONS: dict[str, str] = {
+    "dolls": "Куклы",
+    "series-punk-1": "Series Punk",
+}
+
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 HEADERS = {
@@ -18,8 +24,19 @@ HEADERS = {
 }
 JSON_HEADERS = {"Content-Type": "application/json; charset=utf-8"}
 
-TIMEOUT_SECONDS = 25
+# One invocation now makes at least one request per collection before it sends
+# anything, so the per-request budget has to leave room for all of them inside
+# the Lambda timeout. Pinned by test_the_worst_case_request_time_fits_the_lambda_timeout.
+TIMEOUT_SECONDS = 10
 PAGE_LIMIT = 250
+
+
+def collection_api_url(handle: str) -> str:
+    return f"{BASE_URL}/collections/{handle}/products.json"
+
+
+def collection_page_url(handle: str) -> str:
+    return f"{BASE_URL}/collections/{handle}"
 
 
 def json_response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -50,13 +67,13 @@ def load_telegram_config() -> tuple[str, list[str]]:
     return token, chat_ids
 
 
-def fetch_collection_products() -> list[dict[str, Any]]:
+def fetch_collection_products(handle: str) -> list[dict[str, Any]]:
     products: list[dict[str, Any]] = []
     page = 1
 
     while True:
         response = requests.get(
-            COLLECTION_API_URL,
+            collection_api_url(handle),
             headers=HEADERS,
             timeout=TIMEOUT_SECONDS,
             params={"limit": PAGE_LIMIT, "page": page},
@@ -65,7 +82,7 @@ def fetch_collection_products() -> list[dict[str, Any]]:
 
         page_products = response.json().get("products", [])
         if not isinstance(page_products, list):
-            raise ValueError("Invalid Shopify response: 'products' is not a list")
+            raise ValueError(f"Invalid Shopify response for {handle}: 'products' is not a list")
 
         products.extend(page_products)
 
@@ -76,6 +93,13 @@ def fetch_collection_products() -> list[dict[str, Any]]:
         page += 1
 
     return products
+
+
+def fetch_collections(handles: list[str]) -> dict[str, list[dict[str, Any]]]:
+    # A failing collection aborts the run: a partial poll would report the
+    # missing half as "nothing in stock", which is indistinguishable from a
+    # real empty result.
+    return {handle: fetch_collection_products(handle) for handle in handles}
 
 
 def parse_price(value: Any) -> float | None:
@@ -129,11 +153,57 @@ def extract_available_products(products: list[dict[str, Any]]) -> list[dict[str,
     return available
 
 
+def product_key(product: dict[str, Any]) -> tuple[str, Any]:
+    """Identify a product across collections.
+
+    The feed is untyped, so an id that is not a plain scalar cannot be used as
+    a dict key; fall back to the handle, and finally to the object itself so
+    that two products we cannot identify are never merged into one.
+    """
+    product_id = product.get("id")
+    if isinstance(product_id, int | str):
+        return ("id", product_id)
+
+    handle = product.get("handle")
+    if isinstance(handle, str) and handle:
+        return ("handle", handle)
+
+    return ("object", id(product))
+
+
+def merge_available_products(
+    products_by_collection: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Available products across every polled collection, listed once each.
+
+    A product can sit in more than one collection, so the collections it was
+    found in are collected onto a single entry rather than repeated.
+    """
+    merged: dict[tuple[str, Any], dict[str, Any]] = {}
+
+    for handle, products in products_by_collection.items():
+        for product in extract_available_products(products):
+            key = product_key(product)
+            existing = merged.get(key)
+            if existing is None:
+                product["collections"] = [handle]
+                merged[key] = product
+            elif handle not in existing["collections"]:
+                existing["collections"].append(handle)
+
+    return list(merged.values())
+
+
 def build_telegram_message(products: list[dict[str, Any]]) -> str:
-    lines = ["Найдены доступные куклы:", ""]
+    lines = ["Найдены доступные товары:", ""]
 
     for index, product in enumerate(products, start=1):
         lines.append(f"{index}. {product['title']}")
+
+        labels = [COLLECTIONS.get(handle, handle) for handle in product.get("collections", [])]
+        if labels:
+            lines.append(f"Категория: {', '.join(labels)}")
+
         if product["price"]:
             lines.append(f"Цена: {product['price']}")
         lines.append(f"Ссылка: {product['url']}")
@@ -174,19 +244,25 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         token, chat_ids = load_telegram_config()
 
-        products = fetch_collection_products()
-        available_products = extract_available_products(products)
+        handles = list(COLLECTIONS)
+        products_by_collection = fetch_collections(handles)
+        available_products = merge_available_products(products_by_collection)
 
         message_ids: list[int | None] = []
         if available_products:
             message = build_telegram_message(available_products)
             message_ids = send_telegram_messages(token, chat_ids, message)
 
+        checked_by_collection = {
+            handle: len(products) for handle, products in products_by_collection.items()
+        }
+
         result: dict[str, Any] = {
             "source": "shopify_collection_api",
-            "collection": COLLECTION_HANDLE,
-            "source_url": COLLECTION_PAGE_URL,
-            "checked_products": len(products),
+            "collections": handles,
+            "source_urls": {handle: collection_page_url(handle) for handle in handles},
+            "checked_products": sum(checked_by_collection.values()),
+            "checked_products_by_collection": checked_by_collection,
             "available_count": len(available_products),
             "available_products": available_products,
             "telegram_sent": bool(message_ids),

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One directory per AWS Lambda function, each a self-contained deployment bundle. There is no shared package and no build system — a directory is the unit of deploy.
 
-- `defa-luci/` — polls the `dolls` collection on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
+- `defa-luci/` — polls the collections listed in `COLLECTIONS` on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
 - `telegram-mcp/` — stateless MCP server behind a Lambda Function URL, exposing one `send_notification` tool that relays a message to Telegram.
 - `tests/` — pytest suite covering the pure logic of every function plus the repository conventions below. It is never deployed: the deploy workflow only picks up directories holding a `lambda_function.py`.
 - `REVIEW.md` — the review checklist the PR-review workflow follows, including the English-only rule above.
@@ -90,9 +90,13 @@ Environment: `MCP_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_IDS` (comma-
 
 ## defa-luci design
 
-The function reads the Shopify storefront JSON feed at `/collections/dolls/products.json` rather than parsing the rendered page, so it does not depend on theme markup. `fetch_collection_products` pages through the feed until it gets a page shorter than `PAGE_LIMIT`.
+The function reads the Shopify storefront JSON feed at `/collections/<handle>/products.json` rather than parsing the rendered page, so it does not depend on theme markup. `fetch_collection_products` pages through one collection's feed until it gets a page shorter than `PAGE_LIMIT`.
+
+Which collections are polled is the hardcoded `COLLECTIONS` map at the top of the module: a Shopify handle to the Russian label the Telegram message uses for it. It currently holds `dolls` and `series-punk-1`. `fetch_collections` walks it in order and fails the whole run if any one collection fails — a partial poll would report the missing half as "nothing in stock", which reads exactly like a real empty result. Adding a handle costs one more request per invocation, so it has to be weighed against `TIMEOUT_SECONDS`; `test_the_worst_case_request_time_fits_the_lambda_timeout` pins that budget.
 
 `extract_available_products` keeps a product when any variant has `available is True`, and reports the cheapest available variant price. Every field is read defensively (`isinstance` checks, `.get`) because the feed is third-party and untyped.
+
+`merge_available_products` then folds the per-collection results into one list. Collections overlap — a doll in `series-punk-1` is usually in `dolls` too — so a product is listed once, carrying every collection it was found in under `collections`. Identity comes from `product_key`: the feed's `id` when it is a scalar, the handle when it is not, and otherwise nothing at all, so two products that cannot be identified are never merged into one.
 
 Then, only if something is in stock, `build_telegram_message` renders the list and `send_telegram_messages` posts it to every chat id.
 

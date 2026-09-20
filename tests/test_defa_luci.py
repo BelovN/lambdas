@@ -5,6 +5,7 @@ malformed shapes on purpose: a bad product must be skipped, never crash the run.
 """
 
 import json
+import pathlib
 
 import pytest
 import requests
@@ -87,7 +88,7 @@ def test_the_product_url_is_built_from_the_store_base():
 def test_the_message_stays_russian_and_lists_every_product():
     available = luci.extract_available_products([product(title="A"), product(title="B", handle="b")])
     message = luci.build_telegram_message(available)
-    assert message.startswith("Найдены доступные куклы:")
+    assert message.startswith("Найдены доступные товары:")
     assert "1. A" in message and "2. B" in message
     assert "Цена: 10.00 USD" in message
 
@@ -122,7 +123,9 @@ def test_the_bot_token_is_redacted():
 
 
 def test_nothing_in_stock_sends_nothing(monkeypatch):
-    monkeypatch.setattr(luci, "fetch_collection_products", lambda: [product(variants=[])])
+    monkeypatch.setattr(
+        luci, "fetch_collections", lambda handles: {h: [product(variants=[])] for h in handles}
+    )
     monkeypatch.setattr(
         luci.requests, "post", lambda *a, **kw: pytest.fail("must not message Telegram")
     )
@@ -132,7 +135,7 @@ def test_nothing_in_stock_sends_nothing(monkeypatch):
 
 
 def test_an_upstream_http_error_maps_to_502(monkeypatch):
-    def explode():
+    def explode(handle):
         raise requests.HTTPError("500 for url https://api.telegram.org/bot111:bot-token/x")
 
     monkeypatch.setattr(luci, "fetch_collection_products", explode)
@@ -175,3 +178,161 @@ def test_a_failing_chat_currently_aborts_the_whole_send(monkeypatch):
     with pytest.raises(requests.HTTPError):
         luci.send_telegram_messages("t", ["1", "2"], "text")
     assert calls == ["1"], "chat 2 is never attempted"
+
+
+# --- Polling more than one collection ------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, products):
+        self._products = products
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"products": self._products}
+
+
+class FakeTelegram:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"ok": True, "result": {"message_id": 1}}
+
+
+def fake_feed(products_by_handle, seen=None):
+    """A requests.get standing in for the Shopify feed, keyed by collection handle."""
+
+    def get(url, headers=None, timeout=None, params=None):
+        handle = url.removeprefix(f"{luci.BASE_URL}/collections/").removesuffix("/products.json")
+        if seen is not None:
+            seen.append(handle)
+        if handle not in products_by_handle:
+            raise AssertionError(f"unexpected collection {handle!r}")
+        return FakeResponse(products_by_handle[handle])
+
+    return get
+
+
+def test_the_polled_collections_are_dolls_and_series_punk():
+    # Hardcoded on purpose; this pins the pair so a change is deliberate.
+    assert list(luci.COLLECTIONS) == ["dolls", "series-punk-1"]
+
+
+def test_every_configured_collection_is_polled(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        luci.requests, "get", fake_feed({handle: [] for handle in luci.COLLECTIONS}, seen)
+    )
+    luci.fetch_collections(list(luci.COLLECTIONS))
+    assert seen == list(luci.COLLECTIONS)
+
+
+def test_each_collection_is_fetched_from_its_own_url():
+    assert luci.collection_api_url("series-punk-1") == (
+        f"{luci.BASE_URL}/collections/series-punk-1/products.json"
+    )
+    assert luci.collection_page_url("dolls") == f"{luci.BASE_URL}/collections/dolls"
+
+
+def test_products_from_every_collection_are_reported():
+    merged = luci.merge_available_products(
+        {
+            "dolls": [product(id=1, title="A")],
+            "series-punk-1": [product(id=2, title="B", handle="b")],
+        }
+    )
+    assert [item["title"] for item in merged] == ["A", "B"]
+    assert [item["collections"] for item in merged] == [["dolls"], ["series-punk-1"]]
+
+
+def test_a_product_in_two_collections_is_listed_once():
+    # series-punk-1 overlaps dolls in the live store, so the same doll arrives twice.
+    merged = luci.merge_available_products(
+        {"dolls": [product(id=7)], "series-punk-1": [product(id=7)]}
+    )
+    assert len(merged) == 1
+    assert merged[0]["collections"] == ["dolls", "series-punk-1"]
+
+
+def test_a_product_without_an_id_falls_back_to_its_handle():
+    merged = luci.merge_available_products(
+        {"dolls": [product(id=None, handle="rosa")], "series-punk-1": [product(id=None, handle="rosa")]}
+    )
+    assert len(merged) == 1
+
+
+def test_products_that_cannot_be_identified_are_never_merged():
+    # The feed is untyped: an unusable id and no handle must not collapse two
+    # distinct products into one.
+    merged = luci.merge_available_products(
+        {
+            "dolls": [product(id={"not": "scalar"}, handle=None, title="A")],
+            "series-punk-1": [product(id={"not": "scalar"}, handle=None, title="B")],
+        }
+    )
+    assert [item["title"] for item in merged] == ["A", "B"]
+
+
+def test_the_message_names_the_collection_in_russian():
+    merged = luci.merge_available_products({"series-punk-1": [product()]})
+    assert "Категория: Series Punk" in luci.build_telegram_message(merged)
+
+    both = luci.merge_available_products({"dolls": [product(id=7)], "series-punk-1": [product(id=7)]})
+    assert "Категория: Куклы, Series Punk" in luci.build_telegram_message(both)
+
+
+def test_an_unlabelled_collection_falls_back_to_its_handle():
+    merged = luci.merge_available_products({"fashion-packs": [product()]})
+    assert "Категория: fashion-packs" in luci.build_telegram_message(merged)
+
+
+def test_a_message_built_without_collections_still_renders():
+    # extract_available_products alone attaches no collections.
+    available = luci.extract_available_products([product()])
+    assert "Категория:" not in luci.build_telegram_message(available)
+
+
+def test_the_response_reports_every_polled_collection(monkeypatch):
+    monkeypatch.setattr(
+        luci.requests,
+        "get",
+        fake_feed({"dolls": [product(id=1), product(id=2, handle="b")], "series-punk-1": [product(id=1)]}),
+    )
+    monkeypatch.setattr(
+        luci.requests,
+        "post",
+        lambda *a, **kw: FakeTelegram(),
+    )
+    body = json.loads(luci.lambda_handler({}, None)["body"])
+    assert body["collections"] == ["dolls", "series-punk-1"]
+    assert body["source_urls"]["series-punk-1"] == f"{luci.BASE_URL}/collections/series-punk-1"
+    assert body["checked_products_by_collection"] == {"dolls": 2, "series-punk-1": 1}
+    assert body["checked_products"] == 3
+    # The doll in both collections is counted once.
+    assert body["available_count"] == 2
+
+
+def test_a_failing_collection_aborts_before_telegram_is_messaged(monkeypatch):
+    def get(url, headers=None, timeout=None, params=None):
+        if "series-punk-1" in url:
+            raise requests.HTTPError("404 Not Found")
+        return FakeResponse([product()])
+
+    monkeypatch.setattr(luci.requests, "get", get)
+    monkeypatch.setattr(
+        luci.requests, "post", lambda *a, **kw: pytest.fail("a partial poll must not notify")
+    )
+    assert luci.lambda_handler({}, None)["statusCode"] == 502
+
+
+def test_the_worst_case_request_time_fits_the_lambda_timeout():
+    # One request per collection, then one per chat id, all inside the Lambda
+    # timeout. Adding a collection has to be weighed against TIMEOUT_SECONDS.
+    config = json.loads(
+        (pathlib.Path(__file__).resolve().parent.parent / "defa-luci" / "deploy.json").read_text()
+    )
+    chats_budgeted = 2
+    assert luci.TIMEOUT_SECONDS * (len(luci.COLLECTIONS) + chats_budgeted) <= config["timeout"]
