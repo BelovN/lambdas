@@ -1,0 +1,60 @@
+# Claude по упоминанию @claude в issue, в PR или в комментарии к ревью.
+#
+# Так вносятся правки после ревью: пишешь «@claude поправь X» в треде — Claude
+# правит код в ветке PR и пушит. Так же можно попросить новую функцию в issue.
+#
+# Требует того же, что и claude-review.yml: GitHub App + ANTHROPIC_API_KEY.
+
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude:
+    name: Ответить на @claude
+    # Без этого условия джоба запускается на каждый комментарий в репозитории.
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --allowed-tools "Bash(pip install:*),Bash(python -m pytest:*),Bash(pytest:*),Bash(ruff:*),Bash(python:*)"
+          prompt: |
+            Прочитай CLAUDE.md и REVIEW.md перед тем, как что-то менять.
+
+            Перед пушем прогони локально то же, что гоняет CI:
+              pip install --requirement requirements-dev.txt
+              ruff check .
+              pytest
+
+            Новая lambda-функция — это новая директория с lambda_function.py,
+            requirements.txt и deploy.json. Правки в deploy.yml для этого не
+            нужны. Тесты в tests/ обязательны: tests/test_repo_conventions.py
+            проверит структуру сам, но логику новой функции покрой отдельно.
+
+            Пиши по-русски.
