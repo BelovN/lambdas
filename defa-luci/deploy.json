@@ -3,7 +3,7 @@
   "handler": "lambda_function.lambda_handler",
   "role": "arn:aws:iam::174444914513:role/service-role/defa-luci-role-iy4dhc6v",
   "architecture": "x86_64",
-  "timeout": 30,
+  "timeout": 60,
   "memory_size": 256,
-  "function_url": true
+  "function_url": false
 }
