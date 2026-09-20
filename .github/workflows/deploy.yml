@@ -78,9 +78,18 @@ jobs:
             SELECTED=$(printf '%s\n' "${ALL[@]}")
           fi
 
-          JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' \
-            | jq -R '{name: ., env_secret: ("LAMBDA_ENV_" + (ascii_upcase | gsub("-"; "_")))}' \
-            | jq -sc .)
+          # Рантайм и архитектура берутся из deploy.json функции: сборка должна
+          # идти на том же Python и под ту же архитектуру, иначе pip положит в
+          # бандл несовместимые wheel'ы и функция упадёт с ImportModuleError.
+          JSON=$(printf '%s\n' "$SELECTED" | sed '/^$/d' | while IFS= read -r fn; do
+            runtime=$(jq -r '.runtime // "python3.13"' "$fn/deploy.json" 2>/dev/null || echo python3.13)
+            arch=$(jq -r '.architecture // "x86_64"' "$fn/deploy.json" 2>/dev/null || echo x86_64)
+            jq -nc --arg name "$fn" --arg py "${runtime#python}" --arg arch "$arch" \
+              '{name: $name,
+                python_version: $py,
+                architecture: $arch,
+                env_secret: ("LAMBDA_ENV_" + ($name | ascii_upcase | gsub("-"; "_")))}'
+          done | jq -sc .)
           echo "Функции к деплою: $JSON"
           echo "functions=$JSON" >> "$GITHUB_OUTPUT"
           if [ "$JSON" = "[]" ]; then
@@ -101,11 +110,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Must match the Lambda runtime: pip resolves version-specific wheels,
-      # and a cp312 wheel will not import on a python3.13 runtime.
+      # Должна совпадать с рантаймом лямбды: pip тянет wheel'ы под конкретную
+      # версию, и cp312-wheel не импортируется на python3.13. Версия берётся
+      # из deploy.json функции, а не хардкодится здесь.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python_version }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -117,6 +127,8 @@ jobs:
       - name: Собрать zip
         env:
           FUNCTION: ${{ matrix.name }}
+          ARCH: ${{ matrix.architecture }}
+          PY: ${{ matrix.python_version }}
         run: |
           set -euo pipefail
 
@@ -125,10 +137,25 @@ jobs:
           cp -R "$FUNCTION/." "$BUILD/"
 
           if [ -f "$BUILD/requirements.txt" ]; then
-            pip install --quiet --requirement "$BUILD/requirements.txt" --target "$BUILD"
+            PIP_ARGS=(--quiet --requirement "$BUILD/requirements.txt" --target "$BUILD")
+            if [ "$ARCH" = arm64 ]; then
+              # Раннер x86_64: под arm64 wheel'ы надо запрашивать явно, иначе в
+              # бандл уедут бинарники не той архитектуры.
+              PIP_ARGS+=(--platform manylinux2014_aarch64 --implementation cp
+                         --python-version "$PY" --only-binary=:all:)
+            fi
+            pip install "${PIP_ARGS[@]}"
             rm "$BUILD/requirements.txt"
           fi
           rm -f "$BUILD/deploy.json"
+
+          # update-function-code примет любой zip, и функция с потерянной
+          # зависимостью упадёт только при вызове. Импортируем здесь — ровно то,
+          # что делает рантайм на холодном старте. Для arm64 проверить нечем.
+          if [ "$ARCH" != arm64 ]; then
+            ( cd "$BUILD" && python -c 'import lambda_function as m; assert callable(m.lambda_handler)' )
+            echo "Импорт бандла прошёл."
+          fi
 
           cd "$BUILD"
           zip -qr "$RUNNER_TEMP/$FUNCTION.zip" . \
