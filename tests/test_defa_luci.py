@@ -245,6 +245,11 @@ def test_an_excluded_product_is_never_reported_even_when_in_stock():
     assert [item["handle"] for item in merged] == ["doll"]
 
 
+@pytest.mark.parametrize("handle", [["x"], {"x": 1}])
+def test_an_unhashable_handle_does_not_crash_the_exclusion_check(handle):
+    assert len(luci.extract_available_products([product(handle=handle)])) == 1
+
+
 def test_only_excluded_products_in_stock_sends_nothing(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_IDS", "1")

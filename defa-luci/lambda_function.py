@@ -137,7 +137,9 @@ def extract_available_products(products: list[dict[str, Any]]) -> list[dict[str,
     available: list[dict[str, Any]] = []
 
     for product in products:
-        if product.get("handle") in EXCLUDED_PRODUCT_HANDLES:
+        # The feed is untyped: a list or dict handle would raise on the set lookup.
+        handle = product.get("handle")
+        if isinstance(handle, str) and handle in EXCLUDED_PRODUCT_HANDLES:
             continue
 
         variants = product.get("variants")
