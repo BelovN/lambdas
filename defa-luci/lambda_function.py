@@ -18,6 +18,15 @@ COLLECTIONS: dict[str, str] = {
     "defa-lucy-play": "Defa Lucy Play",
 }
 
+# Products that sit in a doll collection but are not dolls, by Shopify handle.
+# They are dropped before anything is reported, so they never reach Telegram.
+EXCLUDED_PRODUCT_HANDLES: frozenset[str] = frozenset(
+    {
+        # DEFA LUCY PLAY ARTIST KIT: a bare DIY body, listed in defa-lucy-play.
+        "ultraflex-1-0-diy-doll-kit",
+    }
+)
+
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 HEADERS = {
@@ -128,6 +137,11 @@ def extract_available_products(products: list[dict[str, Any]]) -> list[dict[str,
     available: list[dict[str, Any]] = []
 
     for product in products:
+        # The feed is untyped: a list or dict handle would raise on the set lookup.
+        handle = product.get("handle")
+        if isinstance(handle, str) and handle in EXCLUDED_PRODUCT_HANDLES:
+            continue
+
         variants = product.get("variants")
         if not isinstance(variants, list):
             continue
