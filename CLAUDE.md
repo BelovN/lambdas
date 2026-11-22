@@ -8,12 +8,13 @@ One directory per AWS Lambda function, each a self-contained deployment bundle. 
 
 - `defa-luci/` — polls the collections listed in `COLLECTIONS` on `defalucy.com` (Shopify) and pushes in-stock dolls to Telegram.
 - `telegram-mcp/` — stateless MCP server behind a Lambda Function URL, exposing one `send_notification` tool that relays a message to Telegram.
+- `mdl-mcp/` — stateless MCP server behind a Lambda Function URL, exposing the MDL doll catalogue admin API (`medoley.ru`) as tools: search, dolls, brands, photos, translations and glossary.
 - `tests/` — pytest suite covering the pure logic of every function plus the repository conventions below. It is never deployed: the deploy workflow only picks up directories holding a `lambda_function.py`.
 - `REVIEW.md` — the review checklist the PR-review workflow follows, including the English-only rule above.
 
 A function directory contains `lambda_function.py` (with the `lambda_handler` entrypoint AWS expects), an optional `requirements.txt`, and a `deploy.json`. **There are no Lambda layers in this account** — every dependency has to end up inside the zip, and the deploy workflow puts it there by running `pip install --target` into the build directory. Adding a dependency means adding a pinned line to that function's `requirements.txt`; nothing is vendored into git.
 
-Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. Both functions run `python3.13` on `x86_64`.
+Runtime must be Python 3.10+ — the code uses `str | None` and builtin generics. Every function runs `python3.13` on `x86_64`.
 
 The build Python must match the Lambda runtime. `pip` resolves interpreter-specific wheels — `charset_normalizer`, pulled in by `requests`, ships a `cp313` binary wheel — so building on a different Python produces a bundle that fails at import time with `Runtime.ImportModuleError`. Both workflows therefore read `runtime` and `architecture` out of each function's `deploy.json` and feed them to `actions/setup-python` and `pip`; nothing is hardcoded. An `arm64` function is built with explicit `--platform manylinux2014_aarch64 --only-binary=:all:` because the runner is `x86_64`.
 
@@ -49,7 +50,7 @@ Pull requests are the working unit — `main` is deployed on merge, so nothing l
 
 Both Claude workflows need the GitHub App installed and a `CLAUDE_CODE_OAUTH_TOKEN` secret — a subscription token from `claude setup-token`, not a purchased API key. Swap in `anthropic_api_key` if you would rather bill the API. Neither workflow passes `github_token`: GitHub does not run workflows on commits made with the default `GITHUB_TOKEN`, so passing it would mean CI never runs on the fixes Claude pushes. Without the secret the jobs fail; CI and deploy are unaffected.
 
-Both existing functions currently share the execution role `defa-luci-role-iy4dhc6v`, which only grants CloudWatch Logs. It is named after one function but used by both; giving `telegram-mcp` its own role would be an improvement. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
+Every function currently shares the execution role `defa-luci-role-iy4dhc6v`, which only grants CloudWatch Logs. It is named after one function but used by all of them; giving each MCP server its own role would be an improvement. **The directory name must equal the Lambda function name in AWS.** Adding a new function means adding a directory with a `lambda_function.py` in it — the workflow needs no edits. `workflow_dispatch` allows a manual run, optionally scoped to a space-separated list of function names.
 
 AWS auth is OIDC: secret `AWS_ROLE_ARN` plus repository variable `AWS_REGION` (defaults to `eu-north-1`, where the functions live). The IAM role needs `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration` and `lambda:GetFunction`. Setup steps are documented in the workflow's header comment — note in particular that GitHub now issues subject claims containing numeric owner and repo ids (`repo:OWNER@ID/REPO@ID:ref:...`); a trust policy written against the old `repo:OWNER/REPO:ref:...` form fails with `AccessDenied`.
 
@@ -87,6 +88,22 @@ Things worth knowing before changing this:
 - **Batching is rejected.** JSON-RPC batches were removed from MCP in 2025-06-18, so a top-level array gets `-32600`.
 
 Environment: `MCP_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_IDS` (comma-separated).
+
+## mdl-mcp design
+
+The same hand-rolled Streamable HTTP surface as `telegram-mcp` (`server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`, one request per invocation), in front of the MDL backend's `/api/v1`. The backend lives in `../mdl/backend`; its routers and `schemas/` are the contract the tools mirror.
+
+The tools cover what the admin portal does except API key management: `search_dolls`, `get_doll`, `get_field_values`, `create_doll`, `update_doll`, `delete_doll`, `sync_doll_search`; `list_brands`, `create_brand`, `rename_brand`, `reorder_brands`, `delete_brand`; `upload_doll_photo`, `set_photo_crop`, `reorder_doll_photos`, `delete_photo`; `get_doll_translation`, `update_doll_translation`, `refresh_doll_translation`; `list_glossary_terms`, `update_glossary_term`. Every tool is a thin mapping onto one route (the upload onto three), and the backend does the validation. Each tool carries MCP annotations, so the three deletes are marked destructive.
+
+Things worth knowing before changing this:
+
+- **The caller's MDL key is the MCP credential.** A client presents a service key `mdl_sk_<8>_<43>` from the portal's `/admin/api-keys` (as `Authorization: Bearer`, or `?k=` for the claude.ai connector), and the Lambda forwards it unchanged as the API's Bearer token. The Lambda holds no secret and needs no `LAMBDA_ENV_MDL_MCP`. Scopes, expiry and revocation are managed in the portal, and a tool the key lacks a scope for gets the API's 403 back as a tool error. Locally the key is only checked for shape (`API_KEY_RE`), so a made-up key of the right shape still reaches the public read routes (`GET /dolls`, `/brands`, `/dolls/field-values`). That data is public on the API anyway, and every write is authenticated by the backend.
+- **The key must never reach a response or a log.** Error text goes through `redact(text, key)`, and the request log never prints headers or the query string.
+- **The API is `https://medoley.ru` unless `MDL_BASE_URL` says otherwise.** The site sits behind basic auth while `SITE_ACCESS=private`, but the `/api` ingress does not, so the Lambda reaches the API directly. The Meilisearch proxy `/s/` *is* behind basic auth, which is why search goes through `GET /dolls` (name substring + exact filters) rather than full-text search.
+- **Photo upload fetches a caller-supplied URL.** `ensure_public_url` resolves the host and refuses any address that is not global, on every redirect hop, because the Lambda Runtime API listens on `127.0.0.1`. A DNS answer that changes between that check and the fetch is not defended against. The content type is sniffed from the bytes, never taken from headers. The doll is looked up before the presign, because a confirm against a missing doll is refused only after the object is already in storage. Errors from the storage `PUT` are reduced to a status or exception name, since the presigned URL carries a signature.
+- **The upload makes up to five sequential requests**, so `deploy.json` has `timeout: 90` against a per-request `TIMEOUT_SECONDS = 15`. The Function URL's 6 MB payload limit caps `image_base64` at about 4.5 MB of image; `image_url` is good up to the backend's 10 MB.
+- **The API allows 100 requests a minute per IP.** All Lambda invocations share a few egress IPs, so a busy client can hit 429. The tool error says so.
+- **Search results are summaries by default.** `detail: "full"` returns every field. Media entries are always trimmed to id, position, URLs, derivative status and crop. Storage keys are internal.
 
 ## defa-luci design
 

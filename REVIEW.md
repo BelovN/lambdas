@@ -19,7 +19,10 @@ outside those strings as blocking.
 `requests` puts the full URL into `HTTPError` text, and the Telegram URL
 contains the token, so any new error text that leaves the Lambda goes through
 `redact()`. The same holds for `MCP_AUTH_TOKEN`: it must not be printed, from
-either the `Authorization` header or the query string.
+either the `Authorization` header or the query string, and for the MDL service
+key `mdl-mcp` forwards: it goes through `redact(text, key)` and is never
+logged. `mdl-mcp` fetches caller-supplied image URLs; any change there keeps
+the public-address check on every redirect hop.
 
 **Nothing about the configuration reaches an unauthenticated caller.** The
 Function URL is `AuthType: NONE`, so the check in the code is the only thing
