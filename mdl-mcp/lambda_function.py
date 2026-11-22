@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -42,14 +43,18 @@ LIST_TTL_MS = 3_600_000
 SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-06-18", "2025-03-26")
 LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
-# Per outgoing request. A photo upload makes up to five in sequence (doll lookup,
-# image download, presign, storage PUT, confirm), so deploy.json's timeout is 90.
+# Per outgoing request (connect and each read, not a deadline). A photo upload makes
+# four API/storage requests in sequence plus the download, which has its own deadline
+# across every redirect hop; UPLOAD_WORST_CASE_SECONDS must stay under deploy.json's timeout.
 TIMEOUT_SECONDS = 15
+DOWNLOAD_DEADLINE_SECONDS = 30
 USER_AGENT = f"{SERVER_NAME}/{SERVER_VERSION}"
 
 # Mirrors the backend's MEDIA_MAX_BYTES and MEDIA_ALLOWED_CONTENT_TYPES.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 3
+# The last read of a download may block one TIMEOUT_SECONDS past its deadline.
+UPLOAD_WORST_CASE_SECONDS = 4 * TIMEOUT_SECONDS + DOWNLOAD_DEADLINE_SECONDS + TIMEOUT_SECONDS
 
 # Mirrors services/api_keys/keys.py in the backend.
 API_KEY_RE = re.compile(r"mdl_sk_[A-Za-z0-9]{8}_[A-Za-z0-9]{43}")
@@ -588,12 +593,20 @@ def ensure_public_url(url: str) -> None:
 
 
 def download_image(url: str) -> bytes:
+    deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
+
+    def remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ToolInputError(f"image_url took longer than {DOWNLOAD_DEADLINE_SECONDS} s")
+        return min(TIMEOUT_SECONDS, left)
+
     for _ in range(MAX_REDIRECTS + 1):
         ensure_public_url(url)
         with requests.get(
             url,
             stream=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=remaining(),
             allow_redirects=False,
             headers={"User-Agent": USER_AGENT, "Accept": "image/*"},
         ) as response:
@@ -610,6 +623,8 @@ def download_image(url: str) -> bytes:
                 data.extend(chunk)
                 if len(data) > MAX_IMAGE_BYTES:
                     raise ToolInputError("the image is larger than 10 MB")
+                # A server trickling bytes must not hold the invocation past the deadline.
+                remaining()
             return bytes(data)
     raise ToolInputError(f"image_url redirected more than {MAX_REDIRECTS} times")
 
@@ -635,10 +650,21 @@ def image_from_arguments(arguments: dict[str, Any]) -> bytes:
     return data
 
 
+def expect_fields(what: str, body: Any, *names: str) -> dict[str, Any]:
+    """The API answer as a dict carrying each named non-empty string, or an ApiError."""
+    if not isinstance(body, dict) or not all(
+        isinstance(body.get(n), str) and body.get(n) for n in names
+    ):
+        raise ApiError(502, f"MDL API returned an unexpected {what} response")
+    return body
+
+
 def upload_doll_photo(key: str, arguments: dict[str, Any]) -> Any:
     doll_id = require_id(arguments, "doll_id")
     position = arguments.get("position")
-    if position is not None and (not isinstance(position, int) or position < 0):
+    if position is not None and (
+        isinstance(position, bool) or not isinstance(position, int) or position < 0
+    ):
         raise ToolInputError("position must be a non-negative integer")
 
     # Confirm the doll first: an upload confirmed against a missing doll is
@@ -652,7 +678,9 @@ def upload_doll_photo(key: str, arguments: dict[str, Any]) -> Any:
     if content_type is None:
         raise ToolInputError("the image is not JPEG, PNG or WebP")
 
-    presign = api_request(
+    presign = expect_fields(
+        "presign",
+        api_request(
         key,
         "POST",
         "/uploads/presign",
@@ -662,12 +690,17 @@ def upload_doll_photo(key: str, arguments: dict[str, Any]) -> Any:
             "content_type": content_type,
             "size": len(data),
         },
+        ),
+        "upload_url",
+        "storage_key",
     )
     try:
         stored = requests.put(
             presign["upload_url"],
             data=data,
-            headers=presign.get("headers") or {"Content-Type": content_type},
+            headers=presign.get("headers")
+            if isinstance(presign.get("headers"), dict)
+            else {"Content-Type": content_type},
             timeout=TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:

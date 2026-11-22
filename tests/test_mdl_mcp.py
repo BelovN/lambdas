@@ -295,7 +295,7 @@ def test_set_photo_crop_sends_all_four_values(api):
 
 
 def test_translation_tools_use_the_russian_locale(api):
-    call("update_doll_translation", {"doll_id": 2, "description": "Кукла"})
+    call("update_doll_translation", {"doll_id": 2, "description": "\u041a\u0443\u043a\u043b\u0430"})
     call("refresh_doll_translation", {"doll_id": 2})
     assert api.calls[0]["path"] == "/dolls/2/translations/ru"
     assert api.calls[1]["path"] == "/dolls/2/translations/ru/refresh"
@@ -455,3 +455,37 @@ def test_a_storage_failure_does_not_leak_the_presigned_url(api, upload_api, monk
 )
 def test_image_types_are_sniffed_from_the_bytes(data, expected):
     assert mcp.sniff_image_type(data) == expected
+
+
+def test_the_worst_case_upload_fits_the_lambda_timeout():
+    config = json.loads((mcp_dir() / "deploy.json").read_text())
+    assert config["timeout"] > mcp.UPLOAD_WORST_CASE_SECONDS
+
+
+def mcp_dir():
+    import pathlib
+
+    return pathlib.Path(mcp.__file__).parent
+
+
+def test_a_download_past_its_deadline_is_a_tool_error(api, upload_api, public_dns, monkeypatch):
+    clock = iter([0, 0, 1000, 1000, 1000])
+    monkeypatch.setattr(mcp.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(mcp.requests, "get", lambda url, **kw: FakeResponse(200, content=PNG))
+    result, text = call("upload_doll_photo", {"doll_id": 4, "image_url": "https://cdn.example/a"})
+    assert result["isError"] and "longer than" in text
+    assert upload_api == []
+
+
+def test_a_malformed_presign_answer_is_a_tool_error(api, upload_api):
+    api.routes[("POST", "/uploads/presign")] = FakeResponse(201, {"upload_url": ""})
+    encoded = base64.b64encode(PNG).decode()
+    result, text = call("upload_doll_photo", {"doll_id": 4, "image_base64": encoded})
+    assert result["isError"] and "unexpected presign" in text
+    assert upload_api == []
+
+
+def test_a_boolean_position_is_refused(api, upload_api):
+    encoded = base64.b64encode(PNG).decode()
+    result, _ = call("upload_doll_photo", {"doll_id": 4, "image_base64": encoded, "position": True})
+    assert result["isError"]
